@@ -5,32 +5,12 @@ import os
 from typing import Dict, Optional
 import numpy as np
 from datetime import datetime, timedelta
-import sqlite3
 import pandas as pd
 from docx import Document
 import PyPDF2
 
 # Configure OpenAI API key
 openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# Initialize SQLite database
-def init_db():
-    conn = sqlite3.connect("costimaize.db")
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS projects (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        task_description TEXT,
-        total_cost REAL,
-        timestamp REAL
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS bids (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        task_description TEXT,
-        actual_bid REAL,
-        timestamp REAL
-    )''')
-    conn.commit()
-    return conn
 
 # Helper function to fetch market data using OpenAI
 def fetch_helper_data() -> Dict:
@@ -43,18 +23,19 @@ def fetch_helper_data() -> Dict:
     - global_news: a brief summary of global economic news
     If you cannot fetch the data, provide reasonable estimates based on your knowledge and explain your reasoning.
     """
-    response = openai.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "You are a cautious pricing engineer."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=300,
-        temperature=0.7
-    )
     try:
+        response = openai.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a cautious pricing engineer."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=300,
+            temperature=0.7
+        )
         return json.loads(response.choices[0].message.content.strip())
-    except json.JSONDecodeError:
+    except Exception as e:
+        print(f"OpenAI error: {e}")
         return {
             "inflation_rate": 1.03,
             "material_cost": 500,
@@ -65,12 +46,16 @@ def fetch_helper_data() -> Dict:
 # Cost estimation class with cautious pricing logic using OpenAI
 class CostEstimator:
     def __init__(self):
-        # Initialize database
-        self.conn = init_db()
         # Dictionary to store historical prices for 90 days
         if "price_history" not in st.session_state:
             st.session_state.price_history = {}
         self.price_history = st.session_state.price_history
+
+        # Lists to store projects and bids in session state
+        if "projects" not in st.session_state:
+            st.session_state.projects = []
+        if "bids" not in st.session_state:
+            st.session_state.bids = []
 
     def read_file(self, uploaded_file) -> str:
         """Read content from uploaded files (Word, Excel, PDF)."""
@@ -97,18 +82,19 @@ class CostEstimator:
         - contradictions: list of contradictions if any
         Text: {task_description}
         """
-        response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a cautious pricing engineer."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=200,
-            temperature=0.5
-        )
         try:
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a cautious pricing engineer."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=200,
+                temperature=0.5
+            )
             return json.loads(response.choices[0].message.content.strip())
-        except json.JSONDecodeError:
+        except Exception as e:
+            print(f"OpenAI error: {e}")
             return {"tasks": [], "contradictions": ["Failed to analyze scope of work"]}
 
     def estimate_cost_once(self, task_description: str, helper_data: Dict) -> Dict:
@@ -119,18 +105,19 @@ class CostEstimator:
         - reasoning: explanation of the estimation logic, including which helper data you used (if any) and why
         Text: {task_description}
         """
-        response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a cautious pricing engineer."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300,
-            temperature=0.7
-        )
         try:
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a cautious pricing engineer."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=300,
+                temperature=0.7
+            )
             return json.loads(response.choices[0].message.content.strip())
-        except (json.JSONDecodeError, KeyError):
+        except Exception as e:
+            print(f"OpenAI error: {e}")
             return None
 
     def cautious_pricing(self, costs: list, historical_costs: list, task_description: str, helper_data: Dict) -> Dict:
@@ -150,22 +137,23 @@ class CostEstimator:
         - final_cost: the final cost estimate (USD)
         - reasoning: explanation of how you determined the final cost, including any adjustments for logical consistency
         """
-        response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a cautious pricing engineer."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300,
-            temperature=0.7
-        )
         try:
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a cautious pricing engineer."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=300,
+                temperature=0.7
+            )
             result = json.loads(response.choices[0].message.content.strip())
             return {
                 "final_cost": result["final_cost"],
                 "reasoning": result["reasoning"]
             }
-        except (json.JSONDecodeError, KeyError):
+        except Exception as e:
+            print(f"OpenAI error: {e}")
             return {"error": "Failed to apply cautious pricing logic"}
 
     def analyze_and_estimate(self, task_description: str) -> Dict:
@@ -220,7 +208,7 @@ class CostEstimator:
         final_cost = cautious_result["final_cost"]
         reasoning = cautious_result["reasoning"]
 
-        # Store the result in price history and database
+        # Store the result in price history and session state
         result = {
             "tasks": tasks,
             "contradictions": contradictions,
@@ -235,11 +223,12 @@ class CostEstimator:
         }
         st.session_state.price_history = self.price_history
 
-        # Save to database
-        c = self.conn.cursor()
-        c.execute("INSERT INTO projects (task_description, total_cost, timestamp) VALUES (?, ?, ?)",
-                  (task_description, final_cost, datetime.now().timestamp()))
-        self.conn.commit()
+        # Save to session state
+        st.session_state.projects.append({
+            "task_description": task_description,
+            "total_cost": final_cost,
+            "timestamp": datetime.now().timestamp()
+        })
 
         return result
 
@@ -251,24 +240,26 @@ class CostEstimator:
         - deviation_percent: deviation percentage
         - recommendation: recommendation for adjustment if needed
         """
-        response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a cautious pricing engineer."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=200,
-            temperature=0.5
-        )
         try:
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a cautious pricing engineer."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=200,
+                temperature=0.5
+            )
             result = json.loads(response.choices[0].message.content.strip())
-            # Save to database
-            c = self.conn.cursor()
-            c.execute("INSERT INTO bids (task_description, actual_bid, timestamp) VALUES (?, ?, ?)",
-                      (task_description, actual_bid, datetime.now().timestamp()))
-            self.conn.commit()
+            # Save to session state
+            st.session_state.bids.append({
+                "task_description": task_description,
+                "actual_bid": actual_bid,
+                "timestamp": datetime.now().timestamp()
+            })
             return result
-        except json.JSONDecodeError:
+        except Exception as e:
+            print(f"OpenAI error: {e}")
             return {"error": "Invalid response format from OpenAI"}
 
     def update_with_user_input(self, task_description: str, user_input: str) -> Dict:
@@ -277,32 +268,27 @@ class CostEstimator:
         - updated_cost: updated cost
         - reasoning: explanation of the adjustment
         """
-        response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a cautious pricing engineer."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=200,
-            temperature=0.6
-        )
         try:
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a cautious pricing engineer."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=200,
+                temperature=0.6
+            )
             return json.loads(response.choices[0].message.content.strip())
-        except json.JSONDecodeError:
+        except Exception as e:
+            print(f"OpenAI error: {e}")
             return {"error": "Invalid response format from OpenAI"}
 
-# Dashboard statistics from database
+# Dashboard statistics from session state
 def get_dashboard_stats():
-    conn = sqlite3.connect("costimaize.db")
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM projects")
-    total_projects = c.fetchone()[0] or 0
-    c.execute("SELECT SUM(total_cost) FROM projects")
-    total_cost_estimated = c.fetchone()[0] or 0
-    c.execute("SELECT COUNT(*) FROM bids")
-    bids_analyzed = c.fetchone()[0] or 0
+    total_projects = len(st.session_state.get("projects", []))
+    total_cost_estimated = sum(project["total_cost"] for project in st.session_state.get("projects", []))
+    bids_analyzed = len(st.session_state.get("bids", []))
     historical_prices_archived = len(st.session_state.get("price_history", {}))
-    conn.close()
     return {
         "total_projects": total_projects,
         "total_cost_estimated": total_cost_estimated,
@@ -444,4 +430,3 @@ elif st.session_state.page == "archive_prices":
         st.write("No historical prices available.")
     if st.button("Back to Dashboard"):
         st.session_state.page = "dashboard"
-        
