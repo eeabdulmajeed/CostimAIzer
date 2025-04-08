@@ -35,7 +35,7 @@ def fetch_helper_data() -> Dict:
         )
         return json.loads(response.choices[0].message.content.strip())
     except Exception as e:
-        print(f"OpenAI error: {e}")
+        print(f"Error fetching helper data: {e}")
         return {
             "inflation_rate": 1.03,
             "material_cost": 500,
@@ -94,7 +94,7 @@ class CostEstimator:
             )
             return json.loads(response.choices[0].message.content.strip())
         except Exception as e:
-            print(f"OpenAI error: {e}")
+            print(f"Error in validate_scope: {e}")
             return {"tasks": [], "contradictions": ["Failed to analyze scope of work"]}
 
     def estimate_cost_once(self, task_description: str, helper_data: Dict) -> Dict:
@@ -117,7 +117,7 @@ class CostEstimator:
             )
             return json.loads(response.choices[0].message.content.strip())
         except Exception as e:
-            print(f"OpenAI error: {e}")
+            print(f"Error in estimate_cost_once: {e}")
             return None
 
     def cautious_pricing(self, costs: list, historical_costs: list, task_description: str, helper_data: Dict) -> Dict:
@@ -153,7 +153,7 @@ class CostEstimator:
                 "reasoning": result["reasoning"]
             }
         except Exception as e:
-            print(f"OpenAI error: {e}")
+            print(f"Error in cautious_pricing: {e}")
             return {"error": "Failed to apply cautious pricing logic"}
 
     def analyze_and_estimate(self, task_description: str) -> Dict:
@@ -259,7 +259,7 @@ class CostEstimator:
             })
             return result
         except Exception as e:
-            print(f"OpenAI error: {e}")
+            print(f"Error in compare_with_bid: {e}")
             return {"error": "Invalid response format from OpenAI"}
 
     def update_with_user_input(self, task_description: str, user_input: str) -> Dict:
@@ -280,7 +280,7 @@ class CostEstimator:
             )
             return json.loads(response.choices[0].message.content.strip())
         except Exception as e:
-            print(f"OpenAI error: {e}")
+            print(f"Error in update_with_user_input: {e}")
             return {"error": "Invalid response format from OpenAI"}
 
 # Dashboard statistics from session state
