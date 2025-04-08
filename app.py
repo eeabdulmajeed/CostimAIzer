@@ -117,6 +117,11 @@ class CostEstimator:
             print(f"OpenAI response content: {response_content}")
             if not response_content:
                 return {"tasks": [], "contradictions": ["Empty response from OpenAI"]}
+            # تنظيف الاستجابة لإزالة أي نص إضافي قبل JSON
+            if response_content.startswith("...json"):
+                response_content = response_content[7:].strip()
+            if not response_content.startswith("{"):
+                return {"tasks": [], "contradictions": [f"Invalid JSON format from OpenAI: {response_content}"]}
             return json.loads(response_content)
         except json.JSONDecodeError as e:
             print(f"JSON decode error: {str(e)}")
