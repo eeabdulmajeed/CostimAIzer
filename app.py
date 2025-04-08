@@ -11,6 +11,7 @@ import PyPDF2
 
 # Configure OpenAI API key
 openai.api_key = os.getenv("OPENAI_API_KEY")
+openai.proxies = None  # تعطيل أي إعدادات proxies
 
 # اختبار OpenAI API
 try:
@@ -71,6 +72,7 @@ class CostEstimator:
     def read_file(self, uploaded_file) -> str:
         """Read content from uploaded files (Word, Excel, PDF)."""
         content = ""
+        print(f"Attempting to read file: {uploaded_file.name}")
         try:
             if uploaded_file.name.endswith(".docx"):
                 doc = Document(uploaded_file)
@@ -83,7 +85,7 @@ class CostEstimator:
                 content = "\n".join([page.extract_text() for page in reader.pages])
         except Exception as e:
             st.error(f"Failed to read file {uploaded_file.name}: {str(e)}")
-        # تسجيل المحتوى للتحقق
+            print(f"Error reading file {uploaded_file.name}: {str(e)}")
         print(f"File content for {uploaded_file.name}: {content}")
         if not content.strip():
             st.warning(f"No content extracted from file {uploaded_file.name}. Please ensure the file is not empty or corrupted.")
@@ -91,10 +93,10 @@ class CostEstimator:
 
     def validate_scope(self, task_description: str) -> Dict:
         """Analyze the scope of work for contradictions and extract main tasks using OpenAI."""
-        # التحقق من وجود نص قبل إرساله إلى OpenAI
         if not task_description.strip():
             return {"tasks": [], "contradictions": ["No content found in the uploaded file"]}
         
+        print(f"Sending task description to OpenAI: {task_description}")
         prompt = f"""
         As a cautious pricing engineer, analyze the following scope of work to extract main tasks and detect any contradictions. Return the result in JSON format with fields:
         - tasks: list of tasks
@@ -111,7 +113,14 @@ class CostEstimator:
                 max_tokens=200,
                 temperature=0.5
             )
-            return json.loads(response.choices[0].message.content.strip())
+            response_content = response.choices[0].message.content.strip()
+            print(f"OpenAI response content: {response_content}")
+            if not response_content:
+                return {"tasks": [], "contradictions": ["Empty response from OpenAI"]}
+            return json.loads(response_content)
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {str(e)}")
+            return {"tasks": [], "contradictions": [f"Invalid JSON response from OpenAI: {response_content}"]}
         except Exception as e:
             print(f"Error in validate_scope: {str(e)}")
             return {"tasks": [], "contradictions": [f"Failed to analyze scope of work: {str(e)}"]}
