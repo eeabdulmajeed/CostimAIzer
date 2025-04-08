@@ -72,10 +72,18 @@ class CostEstimator:
                 content = "\n".join([page.extract_text() for page in reader.pages])
         except Exception as e:
             st.error(f"Failed to read file {uploaded_file.name}: {str(e)}")
+        # تسجيل المحتوى للتحقق
+        print(f"File content for {uploaded_file.name}: {content}")
+        if not content.strip():
+            st.warning(f"No content extracted from file {uploaded_file.name}. Please ensure the file is not empty or corrupted.")
         return content
 
     def validate_scope(self, task_description: str) -> Dict:
         """Analyze the scope of work for contradictions and extract main tasks using OpenAI."""
+        # التحقق من وجود نص قبل إرساله إلى OpenAI
+        if not task_description.strip():
+            return {"tasks": [], "contradictions": ["No content found in the uploaded file"]}
+        
         prompt = f"""
         As a cautious pricing engineer, analyze the following scope of work to extract main tasks and detect any contradictions. Return the result in JSON format with fields:
         - tasks: list of tasks
@@ -94,8 +102,8 @@ class CostEstimator:
             )
             return json.loads(response.choices[0].message.content.strip())
         except Exception as e:
-            print(f"Error in validate_scope: {e}")
-            return {"tasks": [], "contradictions": ["Failed to analyze scope of work"]}
+            print(f"Error in validate_scope: {str(e)}")
+            return {"tasks": [], "contradictions": [f"Failed to analyze scope of work: {str(e)}"]}
 
     def estimate_cost_once(self, task_description: str, helper_data: Dict) -> Dict:
         """Run a single cost estimation using OpenAI."""
