@@ -12,6 +12,17 @@ import PyPDF2
 # Configure OpenAI API key
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
+# اختبار OpenAI API
+try:
+    test_response = openai.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": "Hello, can you respond?"}],
+        max_tokens=10
+    )
+    print("OpenAI API test successful:", test_response.choices[0].message.content)
+except Exception as e:
+    print("OpenAI API test failed:", str(e))
+
 # Helper function to fetch market data using OpenAI
 def fetch_helper_data() -> Dict:
     """Use OpenAI to fetch and analyze global market data."""
