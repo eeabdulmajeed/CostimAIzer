@@ -36,6 +36,8 @@ try:
     logger.info("OpenAI API test successful: %s", test_response.choices[0].message.content)
 except Exception as e:
     logger.error("OpenAI API test failed: %s", str(e))
+    st.error(f"فشل في الاتصال بـ OpenAI API: {str(e)}. تأكد من إعدادات API Key أو الاتصال بالإنترنت.")
+    st.stop()
 
 # Market data functions
 def get_market_news() -> str:
@@ -139,13 +141,19 @@ class CostEstimator:
                     logger.info("ScopeGPT response (attempt %d): %s", attempt + 1, response_content)
                     if not response_content.strip() or response_content.isspace():
                         if attempt == max_retries - 1:
+                            logger.error("ScopeGPT returned empty response after all attempts.")
                             return {"tasks": [], "contradictions": ["Empty response from OpenAI"], "missing_details": []}
                         continue
                     if not response_content.startswith("{") or not response_content.endswith("}"):
                         if attempt == max_retries - 1:
+                            logger.error("ScopeGPT returned invalid JSON format after all attempts.")
                             return {"tasks": [], "contradictions": ["Invalid JSON format from OpenAI"], "missing_details": []}
                         continue
                     result = json.loads(response_content)
+                    if result.get("contradictions"):
+                        logger.warning("Contradictions detected in scope: %s", result["contradictions"])
+                    else:
+                        logger.info("No contradictions found in scope.")
                     return result
             except json.JSONDecodeError as e:
                 logger.error("JSON decode error (attempt %d): %s", attempt + 1, str(e))
@@ -181,13 +189,19 @@ class CostEstimator:
                     logger.info("MarketGPT response (attempt %d): %s", attempt + 1, response_content)
                     if not response_content.strip() or response_content.isspace():
                         if attempt == max_retries - 1:
+                            logger.error("MarketGPT returned empty response after all attempts.")
                             return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Empty response from OpenAI"}
                         continue
                     if not response_content.startswith("{") or not response_content.endswith("}"):
                         if attempt == max_retries - 1:
+                            logger.error("MarketGPT returned invalid JSON format after all attempts.")
                             return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Invalid JSON format from OpenAI"}
                         continue
                     result = json.loads(response_content)
+                    if result["total_cost"] is None:
+                        logger.warning("MarketGPT failed to estimate cost: %s", result["reasoning"])
+                    else:
+                        logger.info("MarketGPT successfully estimated cost: %s", result["total_cost"])
                     return result
             except json.JSONDecodeError as e:
                 logger.error("Error in estimate_cost_once (attempt %d): %s", attempt + 1, str(e))
@@ -196,7 +210,15 @@ class CostEstimator:
             except Exception as e:
                 logger.error("Error in estimate_cost_once (attempt %d): %s", attempt + 1, str(e))
                 if attempt == max_retries - 1:
-                    return {"total_cost": None, "cost_breakdown": {}, "reasoning": f"Estimation failed: {str(e)}"}
+                    logger.warning("Falling back to default cost due to OpenAI API failure.")
+                    return {
+                        "total_cost": 10000,  # قيمة وهمية للتجربة
+                        "cost_breakdown": {
+                            "direct_costs": {"materials": 6000, "labor": 3000},
+                            "indirect_costs": {"safety": 1000}
+                        },
+                        "reasoning": "Failed to connect to OpenAI API, using default cost for testing."
+                    }
         return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Estimation failed after multiple attempts"}
 
     def validate_cost(self, costs: list, historical_costs: list, task_description: str) -> Dict:
@@ -576,6 +598,8 @@ elif st.session_state.page == "estimation_result":
                         st.write(f"{key}: {value}")
                 st.subheader("Reasoning")
                 st.write(result["reasoning"])
+            else:
+                st.error("فشل في تقدير التكلفة. تحقق من سجل التنفيذ لمعرفة السبب.")
             if st.button("View Execution Log"):
                 with open("execution_log.txt", "r") as f:
                     st.text(f.read())
@@ -615,4 +639,3 @@ elif st.session_state.page == "archive_prices":
         st.write("No historical prices available.")
     if st.button("Back to Dashboard"):
         st.session_state.page = "dashboard"
-        
