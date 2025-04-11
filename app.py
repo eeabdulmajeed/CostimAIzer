@@ -615,3 +615,4 @@ elif st.session_state.page == "archive_prices":
         st.write("No historical prices available.")
     if st.button("Back to Dashboard"):
         st.session_state.page = "dashboard"
+        
