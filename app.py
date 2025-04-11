@@ -8,71 +8,80 @@ from datetime import datetime, timedelta
 import pandas as pd
 from docx import Document
 import PyPDF2
+import logging
+import requests  # لجلب بيانات السوق
 
 # Configure OpenAI API key
 openai.api_key = os.getenv("OPENAI_API_KEY")
-openai.proxies = None  # تعطيل أي إعدادات proxies
+openai.proxies = None
 
-# اختبار OpenAI API
+# Configure logging
+logging.basicConfig(filename='execution_log.txt', level=logging.INFO, 
+                    format='%(asctime)s - %(message)s')
+logger = logging.getLogger()
+
+# Test OpenAI API
 try:
     test_response = openai.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4-turbo",
         messages=[{"role": "user", "content": "Hello, can you respond?"}],
         max_tokens=10
     )
-    print("OpenAI API test successful:", test_response.choices[0].message.content)
+    logger.info("OpenAI API test successful: %s", test_response.choices[0].message.content)
 except Exception as e:
-    print("OpenAI API test failed:", str(e))
+    logger.error("OpenAI API test failed: %s", str(e))
 
-# Helper function to fetch market data using OpenAI
-def fetch_helper_data() -> Dict:
-    """Use OpenAI to fetch and analyze global market data."""
-    prompt = """
-    As a cautious pricing engineer, fetch and analyze current global market data relevant to project cost estimation. Provide the following information in JSON format:
-    - inflation_rate: current global inflation rate
-    - material_cost: average cost of construction materials (USD)
-    - labor_rate: average labor rate (USD/hour)
-    - global_news: a brief summary of global economic news
-    If you cannot fetch the data, provide reasonable estimates based on your knowledge and explain your reasoning.
-    """
-    try:
-        response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a cautious pricing engineer."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300,
-            temperature=0.7
-        )
-        return json.loads(response.choices[0].message.content.strip())
-    except Exception as e:
-        print(f"Error fetching helper data: {e}")
-        return {
-            "inflation_rate": 1.03,
-            "material_cost": 500,
-            "labor_rate": 250,
-            "global_news": "Unable to fetch global news."
-        }
+# Market data functions (new additions)
+def get_market_news() -> str:
+    """Fetch latest market news using NewsAPI (simulated if no API key)."""
+    api_key = os.getenv("NEWSAPI_KEY")  # Add your NewsAPI key in environment variables
+    if api_key:
+        try:
+            url = f"https://newsapi.org/v2/top-headlines?category=business&apiKey={api_key}"
+            response = requests.get(url, timeout=10)
+            news = response.json().get("articles", [])
+            return "\n".join([article["title"] for article in news[:5]])
+        except Exception as e:
+            logger.error("Error fetching market news: %s", str(e))
+    return "Simulated news: Global markets stable, slight material price increase."
 
-# Cost estimation class with cautious pricing logic using OpenAI
+def get_material_prices() -> Dict:
+    """Fetch material prices using Alpha Vantage (simulated if no API key)."""
+    api_key = os.getenv("ALPHAVANTAGE_KEY")  # Add your Alpha Vantage key
+    if api_key:
+        try:
+            url = f"https://www.alphavantage.co/query?function=COMMODITY&symbol=STEEL&apikey={api_key}"
+            response = requests.get(url, timeout=10)
+            data = response.json()
+            return {"steel": data.get("price", 700)}  # Example
+        except Exception as e:
+            logger.error("Error fetching material prices: %s", str(e))
+    return {"steel": 700, "concrete": 300}  # Simulated
+
+def get_inflation_rates() -> float:
+    """Fetch inflation rates (simulated if no real source)."""
+    return 1.06  # Simulated 6% inflation
+
+def get_interest_rates() -> float:
+    """Fetch interest rates (simulated if no real source)."""
+    return 0.045  # Simulated 4.5% interest rate
+
+# Cost estimation class
 class CostEstimator:
     def __init__(self):
-        # Dictionary to store historical prices for 90 days
         if "price_history" not in st.session_state:
             st.session_state.price_history = {}
         self.price_history = st.session_state.price_history
 
-        # Lists to store projects and bids in session state
         if "projects" not in st.session_state:
             st.session_state.projects = []
         if "bids" not in st.session_state:
             st.session_state.bids = []
 
     def read_file(self, uploaded_file) -> str:
-        """Read content from uploaded files (Word, Excel, PDF)."""
+        """Read content from uploaded files."""
+        logger.info("Reading file: %s", uploaded_file.name)
         content = ""
-        print(f"Attempting to read file: {uploaded_file.name}")
         try:
             if uploaded_file.name.endswith(".docx"):
                 doc = Document(uploaded_file)
@@ -85,259 +94,259 @@ class CostEstimator:
                 content = "\n".join([page.extract_text() for page in reader.pages])
         except Exception as e:
             st.error(f"Failed to read file {uploaded_file.name}: {str(e)}")
-            print(f"Error reading file {uploaded_file.name}: {str(e)}")
-        print(f"File content for {uploaded_file.name}: {content}")
+            logger.error("Error reading file %s: %s", uploaded_file.name, str(e))
         if not content.strip():
-            st.warning(f"No content extracted from file {uploaded_file.name}. Please ensure the file is not empty or corrupted.")
+            st.warning(f"No content extracted from {uploaded_file.name}.")
+            logger.warning("No content extracted from %s", uploaded_file.name)
+        logger.info("File content for %s: %s", uploaded_file.name, content[:100])
         return content
 
     def validate_scope(self, task_description: str) -> Dict:
-        """Analyze the scope of work for contradictions and extract main tasks using OpenAI."""
+        """Analyze scope of work (ScopeGPT)."""
         if not task_description.strip():
-            return {"tasks": [], "contradictions": ["No content found in the uploaded file"]}
-        
-        print(f"Sending task description to OpenAI: {task_description}")
+            logger.warning("Empty task description received.")
+            return {"tasks": [], "contradictions": ["No content provided"], "missing_details": []}
+
+        logger.info("Analyzing scope: %s", task_description[:100])
         prompt = f"""
-        As a cautious pricing engineer, analyze the following scope of work to extract main tasks and detect any contradictions. Return the result in JSON format with fields:
-        - tasks: list of tasks
-        - contradictions: list of contradictions if any
-        Text: {task_description}
+        You are ScopeGPT, a cautious pricing engineer. Analyze the following scope of work to extract ALL main tasks (direct and indirect) and detect contradictions or missing details. Direct tasks include material procurement, labor, installation, testing, commissioning. Indirect tasks include safety, security, shipping, financing. Contradictions are inconsistencies (e.g., conflicting timelines). Missing details are critical info not provided (e.g., location, timeline). Return JSON with:
+        - tasks: list of all tasks
+        - contradictions: list of contradictions (empty if none)
+        - missing_details: list of missing details (empty if none)
+        Scope: {task_description}
         """
         try:
-            response = openai.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a cautious pricing engineer."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=200,
-                temperature=0.5
-            )
-            response_content = response.choices[0].message.content.strip()
-            print(f"OpenAI response content: {response_content}")
-            if not response_content:
-                return {"tasks": [], "contradictions": ["Empty response from OpenAI"]}
-            # تنظيف الاستجابة لإزالة أي نص إضافي قبل JSON
-            if response_content.startswith("...json"):
-                response_content = response_content[7:].strip()
-            if not response_content.startswith("{"):
-                return {"tasks": [], "contradictions": [f"Invalid JSON format from OpenAI: {response_content}"]}
-            return json.loads(response_content)
-        except json.JSONDecodeError as e:
-            print(f"JSON decode error: {str(e)}")
-            return {"tasks": [], "contradictions": [f"Invalid JSON response from OpenAI: {response_content}"]}
+            with st.spinner("Analyzing scope..."):
+                response = openai.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=1000,
+                    temperature=0.5
+                )
+                result = json.loads(response.choices[0].message.content.strip())
+                logger.info("ScopeGPT result: %s", json.dumps(result))
+                return result
         except Exception as e:
-            print(f"Error in validate_scope: {str(e)}")
-            return {"tasks": [], "contradictions": [f"Failed to analyze scope of work: {str(e)}"]}
+            logger.error("Error in validate_scope: %s", str(e))
+            return {"tasks": [], "contradictions": [f"Analysis failed: {str(e)}"], "missing_details": []}
 
-    def estimate_cost_once(self, task_description: str, helper_data: Dict) -> Dict:
-        """Run a single cost estimation using OpenAI."""
+    def estimate_cost_once(self, task_description: str) -> Dict:
+        """Estimate cost (MarketGPT) without helper data."""
+        logger.info("Estimating cost for: %s", task_description[:100])
         prompt = f"""
-        As a cautious pricing engineer, estimate the cost for the following text based on deep understanding. You may use the following helper data if you find it relevant: inflation_rate={helper_data['inflation_rate']}, material_cost={helper_data['material_cost']}, labor_rate={helper_data['labor_rate']}, global_news={helper_data['global_news']}. You decide whether to use this data, how to use it, and its impact on the cost. Include all direct and indirect costs, considering global market conditions, inflation, and project-specific factors. Return the result in JSON format with fields:
-        - total_cost: total cost (USD)
-        - reasoning: explanation of the estimation logic, including which helper data you used (if any) and why
-        Text: {task_description}
+        You are MarketGPT, a cautious pricing engineer. Estimate the cost for the scope: {task_description}. Identify ALL direct costs (materials, labor, installation, testing) and indirect costs (safety, shipping, financing). Provide unit costs and totals based on your analysis of the scope and optional market data (news: {get_market_news()}, prices: {get_material_prices()}, inflation: {get_inflation_rates()}, interest: {get_interest_rates()}). You decide if and how to use this data. Explain your reasoning. Return JSON with:
+        - total_cost: total in USD
+        - cost_breakdown: direct and indirect costs with unit costs
+        - reasoning: explanation
         """
         try:
-            response = openai.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a cautious pricing engineer."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=300,
-                temperature=0.7
-            )
-            return json.loads(response.choices[0].message.content.strip())
+            with st.spinner("Estimating cost..."):
+                response = openai.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=300,
+                    temperature=0.7
+                )
+                result = json.loads(response.choices[0].message.content.strip())
+                logger.info("MarketGPT result: %s", json.dumps(result))
+                return result
         except Exception as e:
-            print(f"Error in estimate_cost_once: {e}")
-            return None
+            logger.error("Error in estimate_cost_once: %s", str(e))
+            return {"total_cost": None, "cost_breakdown": {}, "reasoning": f"Estimation failed: {str(e)}"}
 
-    def cautious_pricing(self, costs: list, historical_costs: list, task_description: str, helper_data: Dict) -> Dict:
-        """Apply cautious pricing logic using OpenAI to ensure logical pricing."""
+    def validate_cost(self, costs: list, historical_costs: list, task_description: str) -> Dict:
+        """Validate costs (ValidatorGPT) without helper data."""
         if not costs:
-            return {"error": "No valid cost estimates obtained from simulations"}
+            logger.warning("No valid cost estimates received.")
+            return {"is_valid": False, "discrepancy": "No cost estimates provided", "clarification_request": ""}
 
-        # Prepare historical costs for OpenAI
-        historical_costs_str = ", ".join([str(cost) for cost in historical_costs]) if historical_costs else "No historical costs available"
-
+        historical_costs_str = ", ".join([str(cost) for cost in historical_costs]) if historical_costs else "None"
+        logger.info("Validating costs: %s", costs)
         prompt = f"""
-        As a cautious pricing engineer, you have run 100 cost estimation simulations for the following task: {task_description}. The estimated costs are: {costs}. Historical costs for similar tasks are: {historical_costs_str}. Helper data available: inflation_rate={helper_data['inflation_rate']}, material_cost={helper_data['material_cost']}, labor_rate={helper_data['labor_rate']}, global_news={helper_data['global_news']}. Your task is to:
-        1. Determine the final cost estimate, ensuring it is logical and avoids hallucination or randomness.
-        2. Consider the scope of work, project conditions, global market conditions, and historical costs (if relevant).
-        3. You decide how to use the helper data and historical costs, if at all.
-        Return the result in JSON format with fields:
-        - final_cost: the final cost estimate (USD)
-        - reasoning: explanation of how you determined the final cost, including any adjustments for logical consistency
+        You are ValidatorGPT, a cautious pricing engineer. Validate the costs {costs} for the scope: {task_description}. Historical costs: {historical_costs_str}. Optional market data: news: {get_market_news()}, prices: {get_material_prices()}, inflation: {get_inflation_rates()}, interest: {get_interest_rates()}. Check logical consistency based on the scope and market conditions. Identify discrepancies and request clarification if needed. Return JSON with:
+        - is_valid: boolean
+        - discrepancy: description (or 'No discrepancy')
+        - clarification_request: detailed request (or empty string)
         """
         try:
-            response = openai.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a cautious pricing engineer."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=300,
-                temperature=0.7
-            )
-            result = json.loads(response.choices[0].message.content.strip())
-            return {
-                "final_cost": result["final_cost"],
-                "reasoning": result["reasoning"]
-            }
+            with st.spinner("Validating costs..."):
+                response = openai.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=300,
+                    temperature=0.7
+                )
+                result = json.loads(response.choices[0].message.content.strip())
+                logger.info("ValidatorGPT result: %s", json.dumps(result))
+                return result
         except Exception as e:
-            print(f"Error in cautious_pricing: {e}")
-            return {"error": "Failed to apply cautious pricing logic"}
+            logger.error("Error in validate_cost: %s", str(e))
+            return {"is_valid": False, "discrepancy": f"Validation failed: {str(e)}", "clarification_request": ""}
 
-    def analyze_and_estimate(self, task_description: str) -> Dict:
-        """Estimate cost with cautious pricing logic and Monte Carlo simulation."""
-        # Check if the task has a recent estimate (within 90 days)
+    def request_clarification(self, task_description: str, clarification_request: str) -> Dict:
+        """Request clarification (MarketGPT) without helper data."""
+        logger.info("Requesting clarification for: %s", task_description[:100])
+        prompt = f"""
+        You are MarketGPT. Clarify the cost estimate for the scope: {task_description}. Clarification request: {clarification_request}. Optional market data: news: {get_market_news()}, prices: {get_material_prices()}, inflation: {get_inflation_rates()}, interest: {get_interest_rates()}. Provide a detailed breakdown and reasoning. Return JSON with:
+        - total_cost: revised cost in USD
+        - cost_breakdown: direct and indirect costs with unit costs
+        - reasoning: explanation
+        """
+        try:
+            with st.spinner("Requesting clarification..."):
+                response = openai.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=300,
+                    temperature=0.7
+                )
+                result = json.loads(response.choices[0].message.content.strip())
+                logger.info("MarketGPT clarification: %s", json.dumps(result))
+                return result
+        except Exception as e:
+            logger.error("Error in request_clarification: %s", str(e))
+            return {"total_cost": None, "cost_breakdown": {}, "reasoning": f"Clarification failed: {str(e)}"}
+
+    def coordinate_results(self, task_description: str, scope_result: Dict, market_result: Dict, validator_result: Dict, bid_result: Dict, dialogue_log: Dict) -> Dict:
+        """Coordinate results (CoordinatorGPT)."""
+        logger.info("Coordinating results for: %s", task_description[:100])
+        prompt = f"""
+        You are CoordinatorGPT, a cautious pricing engineer. Coordinate results for the scope: {task_description}:
+        - ScopeGPT: {scope_result}
+        - MarketGPT: {market_result}
+        - ValidatorGPT: {validator_result}
+        - BidGPT: {bid_result}
+        - Dialogue Log: {dialogue_log}
+        Determine the most logical final cost based on all data, resolving discrepancies with full freedom. Return JSON with:
+        - final_cost: final cost in USD
+        - cost_breakdown: direct and indirect costs with unit costs
+        - reasoning: detailed explanation
+        """
+        try:
+            with st.spinner("Coordinating results..."):
+                response = openai.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=300,
+                    temperature=0.7
+                )
+                result = json.loads(response.choices[0].message.content.strip())
+                logger.info("CoordinatorGPT result: %s", json.dumps(result))
+                return result
+        except Exception as e:
+            logger.error("Error in coordinate_results: %s", str(e))
+            return {"final_cost": None, "cost_breakdown": {}, "reasoning": f"Coordination failed: {str(e)}"}
+
+    def analyze_and_estimate_multi_gpt(self, task_description: str) -> Dict:
+        """Estimate cost using Multi-GPT Architecture."""
+        logger.info("Starting Multi-GPT estimation for: %s", task_description[:100])
         if task_description in self.price_history:
             entry = self.price_history[task_description]
-            timestamp = entry["timestamp"]
-            current_time = datetime.now().timestamp()
-            if current_time - timestamp < 90 * 24 * 60 * 60:  # 90 days in seconds
+            if datetime.now().timestamp() - entry["timestamp"] < 90 * 24 * 60 * 60:
+                logger.info("Retrieved from history: %s", task_description)
                 return {
                     "tasks": entry.get("tasks", []),
                     "contradictions": entry.get("contradictions", []),
+                    "missing_details": entry.get("missing_details", []),
                     "total_cost": entry["cost"],
-                    "reasoning": "Retrieved from historical data (within 90 days)."
+                    "cost_breakdown": entry.get("cost_breakdown", {}),
+                    "reasoning": "Retrieved from history (within 90 days)."
                 }
 
-        # Validate scope of work
-        scope_analysis = self.validate_scope(task_description)
-        contradictions = scope_analysis["contradictions"]
-        tasks = scope_analysis["tasks"]
+        scope_result = self.validate_scope(task_description)
+        contradictions = scope_result["contradictions"]
+        tasks = scope_result["tasks"]
+        missing_details = scope_result.get("missing_details", [])
 
-        # If contradictions exist, return them for user clarification
         if contradictions:
+            logger.warning("Contradictions found: %s", contradictions)
             return {
                 "tasks": tasks,
                 "contradictions": contradictions,
+                "missing_details": missing_details,
                 "total_cost": None,
-                "reasoning": "Contradictions detected, please resolve before estimating cost."
+                "cost_breakdown": {},
+                "reasoning": "Contradictions detected, resolve before estimation."
             }
 
-        # Fetch market data
-        helper_data = fetch_helper_data()
+        if missing_details:
+            logger.info("Missing details: %s", missing_details)
 
-        # Monte Carlo simulation: Run 100 simulations
         costs = []
         reasonings = []
-        for _ in range(100):
-            result = self.estimate_cost_once(task_description, helper_data)
-            if result is not None and "total_cost" in result:
+        cost_breakdowns = []
+        for i in range(10):
+            logger.info("Running simulation %d/10", i + 1)
+            result = self.estimate_cost_once(task_description)
+            if result["total_cost"] is not None:
                 costs.append(result["total_cost"])
                 reasonings.append(result["reasoning"])
+                cost_breakdowns.append(result["cost_breakdown"])
 
-        # Get historical costs for comparison
+        market_result = {
+            "total_cost": sum(costs) / len(costs) if costs else 0,
+            "cost_breakdown": cost_breakdowns[-1] if cost_breakdowns else {},
+            "reasoning": reasonings[-1] if reasonings else "Estimated based on simulations."
+        }
+
         historical_costs = [entry["cost"] for entry in self.price_history.values()]
+        validator_result = self.validate_cost(costs, historical_costs, task_description)
 
-        # Apply cautious pricing logic using OpenAI
-        cautious_result = self.cautious_pricing(costs, historical_costs, task_description, helper_data)
-        if "error" in cautious_result:
-            return {"error": cautious_result["error"]}
+        dialogue_log = {}
+        if not validator_result["is_valid"]:
+            clarification_request = validator_result["clarification_request"]
+            if clarification_request:
+                market_clarification = self.request_clarification(task_description, clarification_request)
+                dialogue_log["ValidatorGPT_to_MarketGPT"] = [{"request": clarification_request, "response": market_clarification}]
+                market_result = market_clarification
+                validator_result["is_valid"] = True
 
-        final_cost = cautious_result["final_cost"]
-        reasoning = cautious_result["reasoning"]
+        bid_result = {"estimated_cost": market_result["total_cost"], "actual_bid": None, "deviation_percent": None, "recommendation": "No bid provided."}
+        coordinated_result = self.coordinate_results(task_description, scope_result, market_result, validator_result, bid_result, dialogue_log)
 
-        # Store the result in price history and session state
         result = {
             "tasks": tasks,
             "contradictions": contradictions,
-            "total_cost": final_cost,
-            "reasoning": reasoning
+            "missing_details": missing_details,
+            "total_cost": coordinated_result["final_cost"],
+            "cost_breakdown": coordinated_result["cost_breakdown"],
+            "reasoning": coordinated_result["reasoning"]
         }
         self.price_history[task_description] = {
-            "cost": final_cost,
+            "cost": coordinated_result["final_cost"],
+            "cost_breakdown": coordinated_result["cost_breakdown"],
             "tasks": tasks,
             "contradictions": contradictions,
+            "missing_details": missing_details,
             "timestamp": datetime.now().timestamp()
         }
         st.session_state.price_history = self.price_history
-
-        # Save to session state
         st.session_state.projects.append({
             "task_description": task_description,
-            "total_cost": final_cost,
+            "total_cost": coordinated_result["final_cost"],
             "timestamp": datetime.now().timestamp()
         })
-
+        logger.info("Estimation completed: %s", json.dumps(result))
         return result
 
-    def compare_with_bid(self, task_description: str, actual_bid: float) -> Dict:
-        prompt = f"""
-        As a cautious pricing engineer, compare the actual bid with the previous estimate based on the text: {task_description}. Actual bid: {actual_bid} USD. Return the result in JSON format with fields:
-        - estimated_cost: estimated cost
-        - actual_bid: actual bid
-        - deviation_percent: deviation percentage
-        - recommendation: recommendation for adjustment if needed
-        """
-        try:
-            response = openai.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a cautious pricing engineer."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=200,
-                temperature=0.5
-            )
-            result = json.loads(response.choices[0].message.content.strip())
-            # Save to session state
-            st.session_state.bids.append({
-                "task_description": task_description,
-                "actual_bid": actual_bid,
-                "timestamp": datetime.now().timestamp()
-            })
-            return result
-        except Exception as e:
-            print(f"Error in compare_with_bid: {e}")
-            return {"error": "Invalid response format from OpenAI"}
-
-    def update_with_user_input(self, task_description: str, user_input: str) -> Dict:
-        prompt = f"""
-        As a cautious pricing engineer, update the previous estimate for the text: {task_description} based on the comments: {user_input}. Return the result in JSON format with fields:
-        - updated_cost: updated cost
-        - reasoning: explanation of the adjustment
-        """
-        try:
-            response = openai.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a cautious pricing engineer."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=200,
-                temperature=0.6
-            )
-            return json.loads(response.choices[0].message.content.strip())
-        except Exception as e:
-            print(f"Error in update_with_user_input: {e}")
-            return {"error": "Invalid response format from OpenAI"}
-
-# Dashboard statistics from session state
+# Dashboard stats
 def get_dashboard_stats():
-    total_projects = len(st.session_state.get("projects", []))
-    total_cost_estimated = sum(project["total_cost"] for project in st.session_state.get("projects", []))
-    bids_analyzed = len(st.session_state.get("bids", []))
-    historical_prices_archived = len(st.session_state.get("price_history", {}))
-    return {
-        "total_projects": total_projects,
-        "total_cost_estimated": total_cost_estimated,
-        "bids_analyzed": bids_analyzed,
-        "historical_prices_archived": historical_prices_archived
+    stats = {
+        "total_projects": len(st.session_state.get("projects", [])),
+        "total_cost_estimated": sum(project["total_cost"] for project in st.session_state.get("projects", []) if project["total_cost"] is not None),
+        "bids_analyzed": len(st.session_state.get("bids", [])),
+        "historical_prices_archived": len(st.session_state.get("price_history", {}))
     }
+    logger.info("Dashboard stats: %s", stats)
+    return stats
 
-# Streamlit app with dashboard and service selection
+# Streamlit app
 st.title("CostimAIze - Smart Pricing Engineer")
-st.image("assets/logo.png", use_column_width=True)
-
-# Initialize session state for navigation
 if "page" not in st.session_state:
     st.session_state.page = "dashboard"
+if "is_processing" not in st.session_state:
+    st.session_state.is_processing = False
 
-# Sidebar for navigation
 with st.sidebar:
     st.header("Navigation")
     if st.button("Dashboard"):
@@ -349,7 +358,6 @@ with st.sidebar:
     if st.button("Archive Historical Prices"):
         st.session_state.page = "archive_prices"
 
-# Dashboard page
 if st.session_state.page == "dashboard":
     st.header("Dashboard")
     stats = get_dashboard_stats()
@@ -363,7 +371,7 @@ if st.session_state.page == "dashboard":
     with col4:
         st.metric("Historical Prices Archived", stats["historical_prices_archived"])
 
-    st.subheader("Our Services")
+    st.subheader("Services")
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Estimate Cost", key="dashboard_estimate"):
@@ -375,72 +383,101 @@ if st.session_state.page == "dashboard":
         if st.button("Archive Historical Prices", key="dashboard_archive"):
             st.session_state.page = "archive_prices"
 
-# Estimate Cost page
 elif st.session_state.page == "estimate_cost":
     st.header("Estimate Cost")
-    
-    # File upload for scope of work
-    uploaded_files = st.file_uploader("Upload Scope of Work (Word, Excel, PDF)", type=["docx", "xlsx", "pdf"], accept_multiple_files=True)
+    st.subheader("Optional Information")
+    project_location = st.text_input("Project Location:")
+    project_timeline = st.text_input("Project Timeline:")
+    project_type = st.selectbox("Project Type:", ["Capital", "Unit Price"])
+    extra_info = st.text_area("Other Information:")
+
+    uploaded_files = st.file_uploader("Upload Scope of Work", type=["docx", "xlsx", "pdf"], accept_multiple_files=True)
     if uploaded_files:
         st.session_state.uploaded_files = uploaded_files
         st.success("Files uploaded successfully!")
 
-    # Analyze scope of work and show contradictions
     if "uploaded_files" in st.session_state and st.session_state.uploaded_files:
-        st.subheader("Scope Analysis")
         estimator = CostEstimator()
-        contradictions = []
         task_description = ""
         for uploaded_file in st.session_state.uploaded_files:
             content = estimator.read_file(uploaded_file)
             task_description += f"File: {uploaded_file.name}\n{content}\n"
-            scope_analysis = estimator.validate_scope(content)
-            contradictions.extend(scope_analysis["contradictions"])
-            st.session_state.tasks = scope_analysis["tasks"]
-
+        if project_location:
+            task_description += f"Location: {project_location}\n"
+        if project_timeline:
+            task_description += f"Timeline: {project_timeline}\n"
+        if project_type:
+            task_description += f"Type: {project_type}\n"
+        if extra_info:
+            task_description += f"Extra Info: {extra_info}\n"
         st.session_state.task_description = task_description
 
-        # Display contradictions and allow user input
-        if contradictions:
-            st.subheader("Contradictions Found")
-            for i, contradiction in enumerate(contradictions):
-                st.write(f"Contradiction {i+1}: {contradiction}")
-                user_response = st.text_input(f"Response to contradiction {i+1}:", key=f"contradiction_{i}")
-                if user_response:
-                    st.session_state[f"contradiction_response_{i}"] = user_response
+        if st.button("Proceed to Estimate Cost", disabled=st.session_state.is_processing):
+            st.session_state.is_processing = True
+            try:
+                with st.spinner("Estimating cost..."):
+                    result = estimator.analyze_and_estimate_multi_gpt(task_description)
+                    st.session_state.estimation_result = result
+                    st.session_state.page = "estimation_result"
+            finally:
+                st.session_state.is_processing = False
 
-        # Estimate cost after resolving contradictions
-        if st.button("Proceed to Estimate Cost"):
-            final_description = st.session_state.task_description
-            if "contradiction_response_0" in st.session_state:
-                final_description += f" with user responses: {st.session_state['contradiction_response_0']}"
-            result = estimator.analyze_and_estimate(final_description)
-            st.session_state.estimation_result = result
-            st.session_state.page = "estimation_result"
-
-# Estimation Result page
 elif st.session_state.page == "estimation_result":
     st.header("Cost Estimation Report")
     if "estimation_result" in st.session_state:
         result = st.session_state.estimation_result
-        if "error" in result:
-            st.error(result["error"])
+        if result["contradictions"]:
+            st.subheader("Contradictions")
+            for i, contradiction in enumerate(result["contradictions"]):
+                st.write(f"Contradiction {i+1}: {contradiction}")
+                response = st.text_input(f"Response to contradiction {i+1}:", key=f"contra_{i}")
+                if response:
+                    st.session_state[f"contra_response_{i}"] = response
+            if st.button("Re-estimate"):
+                final_description = st.session_state.task_description
+                for i, _ in enumerate(result["contradictions"]):
+                    if f"contra_response_{i}" in st.session_state:
+                        final_description += f"\nResponse {i+1}: {st.session_state[f'contra_response_{i}']}"
+                estimator = CostEstimator()
+                result = estimator.analyze_and_estimate_multi_gpt(final_description)
+                st.session_state.estimation_result = result
+                st.experimental_rerun()
         else:
-            st.write("Tasks:", result["tasks"])
-            st.write("Contradictions:", result["contradictions"])
-            st.write("Total Cost (USD):", result["total_cost"])
-            st.write("Reasoning:", result["reasoning"])
-    if st.button("Back to Dashboard"):
-        st.session_state.page = "dashboard"
+            st.subheader("Tasks")
+            for i, task in enumerate(result["tasks"]):
+                st.write(f"Task {i+1}: {task}")
+            if result["missing_details"]:
+                st.subheader("Missing Details")
+                for i, detail in enumerate(result["missing_details"]):
+                    st.write(f"Missing Detail {i+1}: {detail}")
+            if result["total_cost"] is not None:
+                st.subheader("Total Cost (USD)")
+                st.write(result["total_cost"])
+                st.subheader("Cost Breakdown")
+                if "direct_costs" in result["cost_breakdown"]:
+                    st.write("Direct Costs:")
+                    for key, value in result["cost_breakdown"]["direct_costs"].items():
+                        st.write(f"{key}: {value}")
+                if "indirect_costs" in result["cost_breakdown"]:
+                    st.write("Indirect Costs:")
+                    for key, value in result["cost_breakdown"]["indirect_costs"].items():
+                        st.write(f"{key}: {value}")
+                st.subheader("Reasoning")
+                st.write(result["reasoning"])
+            if st.button("View Execution Log"):
+                with open("execution_log.txt", "r") as f:
+                    st.text(f.read())
+        if st.button("Back to Dashboard"):
+            st.session_state.page = "dashboard"
 
-# Analyze Bids page
 elif st.session_state.page == "analyze_bids":
     st.header("Analyze Bids")
-    task_description = st.text_area("Enter task description for bid analysis:", "Build a small house with 3 rooms in a high-inflation area")
-    actual_bid = st.number_input("Enter actual bid (USD):", min_value=0.0)
+    task_description = st.text_area("Task Description:")
+    actual_bid = st.number_input("Actual Bid (USD):", min_value=0.0)
     if st.button("Analyze Bid"):
         estimator = CostEstimator()
-        analysis = estimator.compare_with_bid(task_description, actual_bid)
+        with st.spinner("Analyzing bid..."):
+            analysis = estimator.compare_with_bid(task_description, actual_bid)
         if "error" in analysis:
             st.error(analysis["error"])
         else:
@@ -448,13 +485,16 @@ elif st.session_state.page == "analyze_bids":
             st.write("Actual Bid (USD):", analysis["actual_bid"])
             st.write("Deviation (%):", analysis["deviation_percent"])
             st.write("Recommendation:", analysis["recommendation"])
+            st.session_state.bids.append({
+                "task_description": task_description,
+                "actual_bid": actual_bid,
+                "timestamp": datetime.now().timestamp()
+            })
     if st.button("Back to Dashboard"):
         st.session_state.page = "dashboard"
 
-# Archive Historical Prices page
 elif st.session_state.page == "archive_prices":
     st.header("Archive Historical Prices")
-    st.write("Historical prices are archived for 90 days.")
     estimator = CostEstimator()
     if estimator.price_history:
         for task, data in estimator.price_history.items():
