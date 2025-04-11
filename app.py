@@ -77,7 +77,10 @@ class CostEstimator:
     def __init__(self):
         if "price_history" not in st.session_state:
             st.session_state.price_history = {}
+        if "cost_estimates" not in st.session_state:
+            st.session_state.cost_estimates = []
         self.price_history = st.session_state.price_history
+        self.cost_estimates = st.session_state.cost_estimates
 
         if "projects" not in st.session_state:
             st.session_state.projects = []
@@ -158,25 +161,43 @@ class CostEstimator:
         """Estimate cost (MarketGPT) without helper data."""
         logger.info("Estimating cost for: %s", task_description[:100])
         prompt = f"""
-        You are MarketGPT, a cautious pricing engineer. Estimate the cost for the scope: {task_description}. Identify ALL direct costs (materials, labor, installation, testing) and indirect costs (safety, shipping, financing). Provide unit costs and totals based on your analysis of the scope and optional market data (news: {get_market_news()}, prices: {get_material_prices()}, inflation: {get_inflation_rates()}, interest: {get_interest_rates()}). You decide if and how to use this data. Explain your reasoning. Return JSON with:
+        You are MarketGPT, a cautious pricing engineer. Estimate the cost for the scope: {task_description}. Identify ALL direct costs (materials, labor, installation, testing) and indirect costs (safety, shipping, financing). Provide unit costs and totals based on your analysis of the scope and optional market data (news: {get_market_news()}, prices: {get_material_prices()}, inflation: {get_inflation_rates()}, interest: {get_interest_rates()}). You decide if and how to use this data. Explain your reasoning. **Return a valid JSON object starting with '{{' and ending with '}}'. If you encounter any error or cannot estimate the cost, return a default JSON: {{\"total_cost\": null, \"cost_breakdown\": {{}}, \"reasoning\": \"Estimation failed due to insufficient data\"}}. Do not include any additional text outside the JSON.**
+        Return JSON with:
         - total_cost: total in USD
         - cost_breakdown: direct and indirect costs with unit costs
         - reasoning: explanation
         """
-        try:
-            with st.spinner("Estimating cost..."):
-                response = openai.chat.completions.create(
-                    model="gpt-4-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=300,
-                    temperature=0.7
-                )
-                result = json.loads(response.choices[0].message.content.strip())
-                logger.info("MarketGPT result: %s", json.dumps(result))
-                return result
-        except Exception as e:
-            logger.error("Error in estimate_cost_once: %s", str(e))
-            return {"total_cost": None, "cost_breakdown": {}, "reasoning": f"Estimation failed: {str(e)}"}
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with st.spinner("Estimating cost..."):
+                    response = openai.chat.completions.create(
+                        model="gpt-4-turbo",
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=300,
+                        temperature=0.7
+                    )
+                    response_content = response.choices[0].message.content.strip()
+                    logger.info("MarketGPT response (attempt %d): %s", attempt + 1, response_content)
+                    if not response_content.strip() or response_content.isspace():
+                        if attempt == max_retries - 1:
+                            return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Empty response from OpenAI"}
+                        continue
+                    if not response_content.startswith("{") or not response_content.endswith("}"):
+                        if attempt == max_retries - 1:
+                            return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Invalid JSON format from OpenAI"}
+                        continue
+                    result = json.loads(response_content)
+                    return result
+            except json.JSONDecodeError as e:
+                logger.error("Error in estimate_cost_once (attempt %d): %s", attempt + 1, str(e))
+                if attempt == max_retries - 1:
+                    return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Invalid JSON response from OpenAI"}
+            except Exception as e:
+                logger.error("Error in estimate_cost_once (attempt %d): %s", attempt + 1, str(e))
+                if attempt == max_retries - 1:
+                    return {"total_cost": None, "cost_breakdown": {}, "reasoning": f"Estimation failed: {str(e)}"}
+        return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Estimation failed after multiple attempts"}
 
     def validate_cost(self, costs: list, historical_costs: list, task_description: str) -> Dict:
         """Validate costs (ValidatorGPT) without helper data."""
@@ -387,15 +408,20 @@ class CostEstimator:
             "cost_breakdown": coordinated_result["cost_breakdown"],
             "reasoning": coordinated_result["reasoning"]
         }
-        self.price_history[task_description] = {
-            "cost": coordinated_result["final_cost"],
-            "cost_breakdown": coordinated_result["cost_breakdown"],
-            "tasks": tasks,
-            "contradictions": contradictions,
-            "missing_details": missing_details,
-            "timestamp": datetime.now().timestamp()
-        }
-        st.session_state.price_history = self.price_history
+
+        # Save the cost estimate only if total_cost is not None
+        if result["total_cost"] is not None:
+            self.cost_estimates.append({
+                "task_description": task_description,
+                "total_cost": coordinated_result["final_cost"],
+                "cost_breakdown": coordinated_result["cost_breakdown"],
+                "tasks": tasks,
+                "contradictions": contradictions,
+                "missing_details": missing_details,
+                "timestamp": datetime.now().timestamp()
+            })
+            st.session_state.cost_estimates = self.cost_estimates
+
         st.session_state.projects.append({
             "task_description": task_description,
             "total_cost": coordinated_result["final_cost"],
@@ -410,7 +436,7 @@ def get_dashboard_stats():
         "total_projects": len(st.session_state.get("projects", [])),
         "total_cost_estimated": sum(project["total_cost"] for project in st.session_state.get("projects", []) if project["total_cost"] is not None),
         "bids_analyzed": len(st.session_state.get("bids", [])),
-        "historical_prices_archived": len(st.session_state.get("price_history", {}))
+        "cost_estimates_archived": len(st.session_state.get("cost_estimates", []))
     }
     logger.info("Dashboard stats: %s", stats)
     return stats
@@ -418,8 +444,12 @@ def get_dashboard_stats():
 # Streamlit app
 st.title("CostimAIze - Smart Pricing Engineer")
 st.image("assets/logo.png", use_column_width=True)
-st.session_state.setdefault("page", "dashboard")
-st.session_state.setdefault("is_processing", False)
+
+# Initialize session state
+if "page" not in st.session_state:
+    st.session_state.page = "dashboard"
+if "is_processing" not in st.session_state:
+    st.session_state.is_processing = False
 
 with st.sidebar:
     st.header("Navigation")
@@ -443,7 +473,7 @@ if st.session_state.page == "dashboard":
     with col3:
         st.metric("Bids Analyzed", stats["bids_analyzed"])
     with col4:
-        st.metric("Historical Prices Archived", stats["historical_prices_archived"])
+        st.metric("Cost Estimates Archived", stats["cost_estimates_archived"])
 
     st.subheader("Services")
     col1, col2, col3 = st.columns(3)
@@ -523,7 +553,7 @@ elif st.session_state.page == "estimation_result":
                 estimator = CostEstimator()
                 result = estimator.analyze_and_estimate_multi_gpt(final_description)
                 st.session_state.estimation_result = result
-                st.rerun()
+                st.session_state.page = "estimation_result"
         else:
             st.subheader("Tasks")
             for i, task in enumerate(result["tasks"]):
