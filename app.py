@@ -16,6 +16,11 @@ import time
 openai.api_key = os.getenv("OPENAI_API_KEY")
 openai.proxies = None
 
+# Check if API key is set
+if not openai.api_key:
+    st.error("OpenAI API key is missing. Please set the OPENAI_API_KEY environment variable.")
+    st.stop()
+
 # Configure logging
 logging.basicConfig(filename='execution_log.txt', level=logging.INFO, 
                     format='%(asctime)s - %(message)s')
@@ -124,7 +129,7 @@ class CostEstimator:
                     response = openai.chat.completions.create(
                         model="gpt-4-turbo",
                         messages=[{"role": "user", "content": prompt}],
-                        max_tokens=1500,  # زيادة لضمان استجابة كاملة
+                        max_tokens=1500,
                         temperature=0.5
                     )
                     response_content = response.choices[0].message.content.strip()
@@ -225,6 +230,57 @@ class CostEstimator:
         except Exception as e:
             logger.error("Error in request_clarification: %s", str(e))
             return {"total_cost": None, "cost_breakdown": {}, "reasoning": f"Clarification failed: {str(e)}"}
+
+    def compare_with_bid(self, task_description: str, actual_bid: float) -> Dict:
+        """Compare the estimated cost with the actual bid using OpenAI (BidGPT)."""
+        prompt = f"""
+        You are BidGPT, a cautious pricing engineer specialized in bid analysis. Compare the actual bid with the previous estimate based on the text: {task_description}. Actual bid: {actual_bid} USD. Return the result in JSON format with fields:
+        - estimated_cost: estimated cost
+        - actual_bid: actual bid
+        - deviation_percent: deviation percentage
+        - recommendation: recommendation for adjustment if needed
+        """
+        try:
+            with st.spinner("Analyzing bid..."):
+                response = openai.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are BidGPT, a cautious pricing engineer specialized in bid analysis."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=200,
+                    temperature=0.5,
+                    timeout=30
+                )
+                result = json.loads(response.choices[0].message.content.strip())
+                return result
+        except Exception as e:
+            logger.error("Error in compare_with_bid: %s", str(e))
+            return {"error": "Failed to analyze bid"}
+
+    def update_with_user_input(self, task_description: str, user_input: str) -> Dict:
+        """Update the previous estimate based on user input using OpenAI."""
+        prompt = f"""
+        You are a cautious pricing engineer. Update the previous estimate for the text: {task_description} based on the comments: {user_input}. Return the result in JSON format with fields:
+        - updated_cost: updated cost
+        - reasoning: explanation of the adjustment
+        """
+        try:
+            with st.spinner("Updating estimate based on user input..."):
+                response = openai.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are a cautious pricing engineer."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=200,
+                    temperature=0.6,
+                    timeout=30
+                )
+                return json.loads(response.choices[0].message.content.strip())
+        except Exception as e:
+            logger.error("Error in update_with_user_input: %s", str(e))
+            return {"error": "Failed to update estimate"}
 
     def coordinate_results(self, task_description: str, scope_result: Dict, market_result: Dict, validator_result: Dict, bid_result: Dict, dialogue_log: Dict) -> Dict:
         """Coordinate results (CoordinatorGPT)."""
@@ -361,6 +417,7 @@ def get_dashboard_stats():
 
 # Streamlit app
 st.title("CostimAIze - Smart Pricing Engineer")
+st.image("assets/logo.png", use_column_width=True)
 st.session_state.setdefault("page", "dashboard")
 st.session_state.setdefault("is_processing", False)
 
@@ -429,9 +486,102 @@ elif st.session_state.page == "estimate_cost":
             task_description += f"Extra Info: {extra_info}\n"
         st.session_state.task_description = task_description
 
-        placeholder = st.empty()
         if st.button("Proceed to Estimate Cost", key="proceed_button", disabled=st.session_state.is_processing):
             if not st.session_state.is_processing:
                 st.session_state.is_processing = True
-                time.sleep(0.1)  # تأخير بسيط لضمان تحديث الحالة
-                placeholder
+                time.sleep(0.1)
+                st.info("Processing... Please wait.")
+                try:
+                    with st.spinner("Estimating cost..."):
+                        result = estimator.analyze_and_estimate_multi_gpt(task_description)
+                        st.session_state.estimation_result = result
+                        st.session_state.page = "estimation_result"
+                except Exception as e:
+                    st.error(f"Error during estimation: {str(e)}")
+                    logger.error("Error during estimation: %s", str(e))
+                finally:
+                    st.session_state.is_processing = False
+            else:
+                st.warning("Processing is already in progress. Please wait.")
+
+elif st.session_state.page == "estimation_result":
+    st.header("Cost Estimation Report")
+    if "estimation_result" in st.session_state:
+        result = st.session_state.estimation_result
+        if result["contradictions"]:
+            st.subheader("Contradictions")
+            for i, contradiction in enumerate(result["contradictions"]):
+                st.write(f"Contradiction {i+1}: {contradiction}")
+                response = st.text_input(f"Response to contradiction {i+1}:", key=f"contra_{i}")
+                if response:
+                    st.session_state[f"contra_response_{i}"] = response
+            if st.button("Re-estimate"):
+                final_description = st.session_state.task_description
+                for i, _ in enumerate(result["contradictions"]):
+                    if f"contra_response_{i}" in st.session_state:
+                        final_description += f"\nResponse {i+1}: {st.session_state[f'contra_response_{i}']}"
+                estimator = CostEstimator()
+                result = estimator.analyze_and_estimate_multi_gpt(final_description)
+                st.session_state.estimation_result = result
+                st.rerun()
+        else:
+            st.subheader("Tasks")
+            for i, task in enumerate(result["tasks"]):
+                st.write(f"Task {i+1}: {task}")
+            if result["missing_details"]:
+                st.subheader("Missing Details")
+                for i, detail in enumerate(result["missing_details"]):
+                    st.write(f"Missing Detail {i+1}: {detail}")
+            if result["total_cost"] is not None:
+                st.subheader("Total Cost (USD)")
+                st.write(result["total_cost"])
+                st.subheader("Cost Breakdown")
+                if "direct_costs" in result["cost_breakdown"]:
+                    st.write("Direct Costs:")
+                    for key, value in result["cost_breakdown"]["direct_costs"].items():
+                        st.write(f"{key}: {value}")
+                if "indirect_costs" in result["cost_breakdown"]:
+                    st.write("Indirect Costs:")
+                    for key, value in result["cost_breakdown"]["indirect_costs"].items():
+                        st.write(f"{key}: {value}")
+                st.subheader("Reasoning")
+                st.write(result["reasoning"])
+            if st.button("View Execution Log"):
+                with open("execution_log.txt", "r") as f:
+                    st.text(f.read())
+        if st.button("Back to Dashboard"):
+            st.session_state.page = "dashboard"
+
+elif st.session_state.page == "analyze_bids":
+    st.header("Analyze Bids")
+    task_description = st.text_area("Task Description:")
+    actual_bid = st.number_input("Actual Bid (USD):", min_value=0.0)
+    if st.button("Analyze Bid"):
+        estimator = CostEstimator()
+        with st.spinner("Analyzing bid..."):
+            analysis = estimator.compare_with_bid(task_description, actual_bid)
+        if "error" in analysis:
+            st.error(analysis["error"])
+        else:
+            st.write("Estimated Cost (USD):", analysis["estimated_cost"])
+            st.write("Actual Bid (USD):", analysis["actual_bid"])
+            st.write("Deviation (%):", analysis["deviation_percent"])
+            st.write("Recommendation:", analysis["recommendation"])
+            st.session_state.bids.append({
+                "task_description": task_description,
+                "actual_bid": actual_bid,
+                "timestamp": datetime.now().timestamp()
+            })
+    if st.button("Back to Dashboard"):
+        st.session_state.page = "dashboard"
+
+elif st.session_state.page == "archive_prices":
+    st.header("Archive Historical Prices")
+    estimator = CostEstimator()
+    if estimator.price_history:
+        for task, data in estimator.price_history.items():
+            st.write(f"Task: {task}, Cost: {data['cost']} USD, Timestamp: {datetime.fromtimestamp(data['timestamp'])}")
+    else:
+        st.write("No historical prices available.")
+    if st.button("Back to Dashboard"):
+        st.session_state.page = "dashboard"
