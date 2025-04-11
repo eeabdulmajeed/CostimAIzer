@@ -7,7 +7,9 @@ import numpy as np
 from datetime import datetime, timedelta
 import pandas as pd
 from docx import Document
-import PyPDF2
+import pdfplumber
+import pytesseract  # لدعم النصوص الممسوحة ضوئيًا
+from PIL import Image  # لتحويل صفحات PDF إلى صور
 import logging
 import requests
 import time
@@ -64,7 +66,14 @@ def get_material_prices() -> Dict:
             return {"steel": data.get("price", 700)}
         except Exception as e:
             logger.error("Error fetching material prices: %s", str(e))
-    return {"steel": 700, "concrete": 300}
+    return {
+        "steel": 700,
+        "concrete": 300,
+        "cement": 150,
+        "labor_hourly_rate": 50,
+        "equipment_rental_daily": 200,
+        "timber": 400
+    }
 
 def get_inflation_rates() -> float:
     """Fetch inflation rates (simulated if no real source)."""
@@ -90,7 +99,7 @@ class CostEstimator:
             st.session_state.bids = []
 
     def read_file(self, uploaded_file) -> str:
-        """Read content from uploaded files."""
+        """Read content from uploaded files, including scanned PDFs using OCR."""
         logger.info("Reading file: %s", uploaded_file.name)
         content = ""
         try:
@@ -101,28 +110,45 @@ class CostEstimator:
                 df = pd.read_excel(uploaded_file)
                 content = df.to_string()
             elif uploaded_file.name.endswith(".pdf"):
-                reader = PyPDF2.PdfReader(uploaded_file)
-                content = "\n".join([page.extract_text() for page in reader.pages])
+                # استخدام pdfplumber لمحاولة استخراج النص أولاً
+                with pdfplumber.open(uploaded_file) as pdf:
+                    content = "\n".join([page.extract_text() or "" for page in pdf.pages])
+                
+                # إذا لم يتم استخراج نص (أي أن الملف ممسوح ضوئيًا)، استخدم OCR
+                if not content.strip():
+                    logger.info("No text extracted with pdfplumber, attempting OCR with pytesseract for %s", uploaded_file.name)
+                    content = ""
+                    with pdfplumber.open(uploaded_file) as pdf:
+                        for page in pdf.pages:
+                            # تحويل الصفحة إلى صورة
+                            image = page.to_image(resolution=300)  # زيادة الدقة لتحسين نتائج OCR
+                            pil_image = Image.frombytes("RGB", (image.width, image.height), image.rgb)
+                            # استخدام pytesseract لاستخراج النص من الصورة
+                            text = pytesseract.image_to_string(pil_image, lang='eng+ara')  # دعم اللغتين العربية والإنجليزية
+                            content += text + "\n"
+                    logger.info("OCR completed for %s, extracted content: %s", uploaded_file.name, content[:500])
         except Exception as e:
             st.error(f"Failed to read file {uploaded_file.name}: {str(e)}")
             logger.error("Error reading file %s: %s", uploaded_file.name, str(e))
+        
+        # تسجيل النص المستخرج للتحقق
+        logger.info("Extracted content from %s: %s", uploaded_file.name, content[:500])
         if not content.strip():
-            st.warning(f"No content extracted from {uploaded_file.name}.")
-            logger.warning("No content extracted from %s", uploaded_file.name)
-        logger.info("File content for %s: %s", uploaded_file.name, content[:100])
+            st.warning(f"No content extracted from {uploaded_file.name}, even with OCR.")
+            logger.warning("No content extracted from %s, even with OCR", uploaded_file.name)
         return content
 
     def validate_scope(self, task_description: str) -> Dict:
-        """Analyze scope of work (ScopeGPT)."""
+        """Analyze scope of work (ScopeGPT) with improved prompt for professional scopes."""
         if not task_description.strip():
             logger.warning("Empty task description received.")
             return {"tasks": [], "contradictions": ["No content provided"], "missing_details": []}
 
-        logger.info("Analyzing scope: %s", task_description[:100])
+        logger.info("Analyzing scope: %s", task_description[:500])
         prompt = f"""
-        You are ScopeGPT, a cautious pricing engineer. Analyze the following scope of work to extract ALL main tasks (direct and indirect) and detect contradictions or missing details. Direct tasks include material procurement, labor, installation, testing, commissioning. Indirect tasks include safety, security, shipping, financing. Contradictions are inconsistencies (e.g., conflicting timelines). Missing details are critical info not provided (e.g., location, timeline). **Return a valid JSON object starting with '{{' and ending with '}}'. If you encounter any error or cannot analyze the scope, return a default JSON: {{\"tasks\": [], \"contradictions\": [\"Scope analysis failed due to unexpected error\"], \"missing_details\": []}}. Do not include any additional text outside the JSON.**
+        You are ScopeGPT, a cautious pricing engineer specialized in analyzing professional scopes of work. Analyze the following scope of work to extract ALL main tasks (direct and indirect) and detect contradictions or missing details. The scope is highly professional and expected to contain all necessary details (e.g., quantities, material types, labor hours, timelines). Direct tasks include material procurement, labor, installation, testing, commissioning. Indirect tasks include safety, security, shipping, financing. Contradictions are inconsistencies (e.g., conflicting timelines). Missing details are critical info not provided (e.g., location, timeline), but assume the scope is complete unless clear gaps are found. The scope may contain technical terms (e.g., 'PTS', 'Rev-01') and mixed language (English/Arabic). Extract tasks accurately, handle technical terms, and support mixed language. **Return a valid JSON object starting with '{{' and ending with '}}'. If you encounter any error or cannot analyze the scope, return a default JSON: {{\"tasks\": [], \"contradictions\": [\"Scope analysis failed due to unexpected error\"], \"missing_details\": []}}. Do not include any additional text outside the JSON.**
         Return JSON with:
-        - tasks: list of all tasks
+        - tasks: list of all tasks with details (e.g., "Material procurement: 100 tons of steel")
         - contradictions: list of contradictions (empty if none)
         - missing_details: list of missing details (empty if none)
         Scope: {task_description}
@@ -165,15 +191,25 @@ class CostEstimator:
                     return {"tasks": [], "contradictions": [f"Analysis failed: {str(e)}"], "missing_details": []}
         return {"tasks": [], "contradictions": ["Analysis failed after multiple attempts"], "missing_details": []}
 
-    def estimate_cost_once(self, task_description: str) -> Dict:
-        """Estimate cost (MarketGPT) without helper data."""
-        logger.info("Estimating cost for: %s", task_description[:100])
+    def estimate_cost_once(self, task_description: str, project_type: str = "Capital") -> Dict:
+        """Estimate cost (MarketGPT) with improved prompt and fallback."""
+        logger.info("Estimating cost for: %s", task_description[:500])
+        historical_costs = [entry["cost"] for entry in self.price_history.values()] if self.price_history else []
+        historical_costs_str = ", ".join([str(cost) for cost in historical_costs]) if historical_costs else "None"
+        market_data = {
+            "news": get_market_news(),
+            "prices": get_material_prices(),
+            "inflation": get_inflation_rates(),
+            "interest": get_interest_rates()
+        }
+        logger.info("Market data for estimation: %s", json.dumps(market_data))
+        
         prompt = f"""
-        You are MarketGPT, a cautious pricing engineer. Estimate the cost for the scope: {task_description}. Identify ALL direct costs (materials, labor, installation, testing) and indirect costs (safety, shipping, financing). Provide unit costs and totals based on your analysis of the scope and optional market data (news: {get_market_news()}, prices: {get_material_prices()}, inflation: {get_inflation_rates()}, interest: {get_interest_rates()}). You decide if and how to use this data. Explain your reasoning. **Return a valid JSON object starting with '{{' and ending with '}}'. If you encounter any error or cannot estimate the cost, return a default JSON: {{\"total_cost\": null, \"cost_breakdown\": {{}}, \"reasoning\": \"Estimation failed due to insufficient data\"}}. Do not include any additional text outside the JSON.**
+        You are MarketGPT, a cautious pricing engineer specialized in cost estimation for professional scopes of work. Estimate the cost for the scope: {task_description}. The scope is highly professional and contains all necessary details (e.g., quantities, material types, labor hours). Identify ALL direct costs (materials, labor, installation, testing) and indirect costs (safety, shipping, financing). Provide unit costs and totals based on the scope details and optional market data (news: {market_data['news']}, prices: {market_data['prices']}, inflation: {market_data['inflation']}, interest: {market_data['interest']}). If historical costs are available ({historical_costs_str}), analyze them and decide whether to include them in your estimation, how to use them (e.g., as a reference for average costs), and what percentage to weight them (e.g., 50% historical, 50% market-based). You have full freedom to make this decision. If any details are unclear, make logical assumptions (e.g., average quantities, standard labor hours) and explain them in your reasoning. **Return a valid JSON object starting with '{{' and ending with '}}'. If you encounter any error, return a default JSON: {{\"total_cost\": null, \"cost_breakdown\": {{}}, \"reasoning\": \"Estimation failed due to unexpected error\"}}. Do not include any additional text outside the JSON.**
         Return JSON with:
         - total_cost: total in USD
         - cost_breakdown: direct and indirect costs with unit costs
-        - reasoning: explanation
+        - reasoning: detailed explanation including any assumptions and use of historical costs
         """
         max_retries = 3
         for attempt in range(max_retries):
@@ -190,39 +226,45 @@ class CostEstimator:
                     if not response_content.strip() or response_content.isspace():
                         if attempt == max_retries - 1:
                             logger.error("MarketGPT returned empty response after all attempts.")
-                            return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Empty response from OpenAI"}
+                            break
                         continue
                     if not response_content.startswith("{") or not response_content.endswith("}"):
                         if attempt == max_retries - 1:
                             logger.error("MarketGPT returned invalid JSON format after all attempts.")
-                            return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Invalid JSON format from OpenAI"}
+                            break
                         continue
                     result = json.loads(response_content)
                     if result["total_cost"] is None:
                         logger.warning("MarketGPT failed to estimate cost: %s", result["reasoning"])
-                    else:
-                        logger.info("MarketGPT successfully estimated cost: %s", result["total_cost"])
+                        break
+                    logger.info("MarketGPT successfully estimated cost: %s", result["total_cost"])
                     return result
             except json.JSONDecodeError as e:
                 logger.error("Error in estimate_cost_once (attempt %d): %s", attempt + 1, str(e))
                 if attempt == max_retries - 1:
-                    return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Invalid JSON response from OpenAI"}
+                    break
             except Exception as e:
                 logger.error("Error in estimate_cost_once (attempt %d): %s", attempt + 1, str(e))
                 if attempt == max_retries - 1:
-                    logger.warning("Falling back to default cost due to OpenAI API failure.")
-                    return {
-                        "total_cost": 10000,  # قيمة وهمية للتجربة
-                        "cost_breakdown": {
-                            "direct_costs": {"materials": 6000, "labor": 3000},
-                            "indirect_costs": {"safety": 1000}
-                        },
-                        "reasoning": "Failed to connect to OpenAI API, using default cost for testing."
-                    }
-        return {"total_cost": None, "cost_breakdown": {}, "reasoning": "Estimation failed after multiple attempts"}
+                    break
+        
+        # آلية احتياط: إذا فشل MarketGPT، استخدم تكلفة افتراضية بناءً على نوع المشروع وعدد المهام
+        logger.warning("Falling back to default cost estimation due to MarketGPT failure.")
+        scope_result = self.validate_scope(task_description)
+        num_tasks = len(scope_result["tasks"]) if scope_result["tasks"] else 1
+        default_cost_per_task = 5000 if project_type == "Capital" else 3000
+        default_total_cost = num_tasks * default_cost_per_task
+        return {
+            "total_cost": default_total_cost,
+            "cost_breakdown": {
+                "direct_costs": {"materials": default_total_cost * 0.6, "labor": default_total_cost * 0.3},
+                "indirect_costs": {"safety": default_total_cost * 0.1}
+            },
+            "reasoning": f"MarketGPT failed to estimate cost. Using default cost: {default_cost_per_task} USD per task for {project_type} project with {num_tasks} tasks."
+        }
 
     def validate_cost(self, costs: list, historical_costs: list, task_description: str) -> Dict:
-        """Validate costs (ValidatorGPT) without helper data."""
+        """Validate costs (ValidatorGPT)."""
         if not costs:
             logger.warning("No valid cost estimates received.")
             return {"is_valid": False, "discrepancy": "No cost estimates provided", "clarification_request": ""}
@@ -251,7 +293,7 @@ class CostEstimator:
             return {"is_valid": False, "discrepancy": f"Validation failed: {str(e)}", "clarification_request": ""}
 
     def request_clarification(self, task_description: str, clarification_request: str) -> Dict:
-        """Request clarification (MarketGPT) without helper data."""
+        """Request clarification (MarketGPT)."""
         logger.info("Requesting clarification for: %s", task_description[:100])
         prompt = f"""
         You are MarketGPT. Clarify the cost estimate for the scope: {task_description}. Clarification request: {clarification_request}. Optional market data: news: {get_market_news()}, prices: {get_material_prices()}, inflation: {get_inflation_rates()}, interest: {get_interest_rates()}. Provide a detailed breakdown and reasoning. Return JSON with:
@@ -355,9 +397,9 @@ class CostEstimator:
             logger.error("Error in coordinate_results: %s", str(e))
             return {"final_cost": None, "cost_breakdown": {}, "reasoning": f"Coordination failed: {str(e)}"}
 
-    def analyze_and_estimate_multi_gpt(self, task_description: str) -> Dict:
+    def analyze_and_estimate_multi_gpt(self, task_description: str, project_type: str = "Capital") -> Dict:
         """Estimate cost using Multi-GPT Architecture."""
-        logger.info("Starting Multi-GPT estimation for: %s", task_description[:100])
+        logger.info("Starting Multi-GPT estimation for: %s", task_description[:500])
         if task_description in self.price_history:
             entry = self.price_history[task_description]
             if datetime.now().timestamp() - entry["timestamp"] < 90 * 24 * 60 * 60:
@@ -395,7 +437,7 @@ class CostEstimator:
         cost_breakdowns = []
         for i in range(10):
             logger.info("Running simulation %d/10", i + 1)
-            result = self.estimate_cost_once(task_description)
+            result = self.estimate_cost_once(task_description, project_type)
             if result["total_cost"] is not None:
                 costs.append(result["total_cost"])
                 reasonings.append(result["reasoning"])
@@ -537,6 +579,7 @@ elif st.session_state.page == "estimate_cost":
         if extra_info:
             task_description += f"Extra Info: {extra_info}\n"
         st.session_state.task_description = task_description
+        st.session_state.project_type = project_type
 
         if st.button("Proceed to Estimate Cost", key="proceed_button", disabled=st.session_state.is_processing):
             if not st.session_state.is_processing:
@@ -545,7 +588,7 @@ elif st.session_state.page == "estimate_cost":
                 st.info("Processing... Please wait.")
                 try:
                     with st.spinner("Estimating cost..."):
-                        result = estimator.analyze_and_estimate_multi_gpt(task_description)
+                        result = estimator.analyze_and_estimate_multi_gpt(task_description, project_type)
                         st.session_state.estimation_result = result
                         st.session_state.page = "estimation_result"
                 except Exception as e:
@@ -573,7 +616,7 @@ elif st.session_state.page == "estimation_result":
                     if f"contra_response_{i}" in st.session_state:
                         final_description += f"\nResponse {i+1}: {st.session_state[f'contra_response_{i}']}"
                 estimator = CostEstimator()
-                result = estimator.analyze_and_estimate_multi_gpt(final_description)
+                result = estimator.analyze_and_estimate_multi_gpt(final_description, st.session_state.project_type)
                 st.session_state.estimation_result = result
                 st.session_state.page = "estimation_result"
         else:
