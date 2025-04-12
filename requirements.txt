@@ -1,9 +1,8 @@
 streamlit>=1.20.0
-openai>=1.0.0
-python-docx>=0.8.11
-pdfplumber>=0.11.0  # لاستخراج النص والجداول من PDF
-pytesseract>=0.3.10  # لدعم OCR للملفات الممسوحة ضوئيًا
-Pillow>=10.0.0  # لتحويل صفحات PDF إلى صور
+pytesseract>=0.3.10
+Pillow>=10.0.0
 pandas>=1.5.0
 numpy>=1.24.0
 requests>=2.28.0
+pdf2image>=1.16.0  # لتحويل صفحات PDF إلى صور
+nltk>=3.8.1  # لتحليل النصوص باستخدام NLP
