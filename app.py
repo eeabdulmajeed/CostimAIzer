@@ -16,6 +16,13 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
+# إنشاء ملف السجل مع رسالة افتراضية
+try:
+    with open("execution_log.txt", "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now()} - INFO - التطبيق بدأ تشغيله\n")
+except Exception as e:
+    print(f"Error initializing log file: {str(e)}")
+
 # إعداد OpenAI API
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
@@ -112,7 +119,6 @@ def validate_cost(costs, market_data):
         if not validated_costs:
             raise ValueError("No valid costs provided")
         
-        # طبقة الاعتراض الداخلي
         expected_range = market_data.get("expected_range", {"min": 0, "max": float("inf")})
         min_cost, max_cost = expected_range.get("min", 0), expected_range.get("max", float("inf"))
         for cost in validated_costs:
@@ -135,7 +141,6 @@ def monte_carlo_simulation(simulations, market_data):
     for sim in simulations:
         try:
             if sim.get("total_cost") is not None:
-                # إضافة تغيير طفيف (±5%)
                 variation = np.random.normal(0, 0.05 * sim["total_cost"])
                 adjusted_cost = max(0, sim["total_cost"] + variation)
                 valid_costs.append(adjusted_cost)
@@ -148,7 +153,6 @@ def monte_carlo_simulation(simulations, market_data):
         logging.error("No valid Monte Carlo costs")
         return None, []
     
-    # كشف القيم الشاذة
     avg_cost = np.mean(valid_costs)
     outliers = [c for c in valid_costs if abs(c - avg_cost) > 2 * np.std(valid_costs)]
     logging.info(f"Monte Carlo: avg={avg_cost}, outliers={len(outliers)}")
@@ -179,11 +183,9 @@ def coordinate_results(simulations, market_data):
             "reasoning": "Monte Carlo simulation failed"
         }
     
-    # اختيار أفضل محاكاة
     best_simulation = max(valid_simulations, key=lambda x: x["total_cost"])
     logging.info(f"Selected cost: {avg_cost}")
     
-    # إنشاء تقرير تفسيري
     total = sum(v for v in best_simulation["cost_breakdown"]["direct_costs"].values()) + \
             sum(v for v in best_simulation["cost_breakdown"]["indirect_costs"].values())
     breakdown = {
@@ -222,105 +224,7 @@ def read_file(file):
         logging.error(f"File read error: {str(e)}")
         return ""
 
-# الواجهة الرئيسية
-def main():
-    st.title("CostimAIze - تقدير ذكي للتكاليف")
-    
-    if "analysis_completed" not in st.session_state:
-        st.session_state.analysis_completed = False
-    if "final_result" not in st.session_state:
-        st.session_state.final_result = None
-    
-    st.subheader("تفاصيل المشروع")
-    project_location = st.text_input("موقع المشروع:")
-    project_timeline = st.text_input("الجدول الزمني:")
-    project_type = st.selectbox("نوع المشروع:", ["Capital", "Maintenance", "Other"])
-    other_info = st.text_area("معلومات إضافية:")
-    
-    st.subheader("رفع نطاق العمل")
-    uploaded_files = st.file_uploader(
-        "ارفع الملفات",
-        type=['docx', 'xlsx', 'pdf', 'png', 'jpg'],
-        accept_multiple_files=True
-    )
-    
-    if uploaded_files:
-        for uploaded_file in uploaded_files:
-            st.write(f"{uploaded_file.name} ({uploaded_file.size / 1024:.1f}KB)")
-        
-        if st.button("بدء التقدير"):
-            with st.spinner("جارٍ التحليل..."):
-                file_contents = []
-                for uploaded_file in uploaded_files:
-                    content = read_file(uploaded_file)
-                    file_contents.append(f"File: {uploaded_file.name}\n{content}")
-                
-                project_details = f"""
-                LOCATION: {project_location}
-                TIMELINE: {project_timeline}
-                TYPE: {project_type}
-                OTHER: {other_info}
-                """
-                combined_content = project_details + "\n" + "\n".join(file_contents)
-                
-                market_data = dynamic_market_analysis(combined_content)
-                if market_data.get("status") == "error":
-                    st.error(market_data["message"])
-                    return
-                
-                final_result = analyze_and_estimate_multi_gpt(combined_content, project_type, market_data)
-                st.session_state.final_result = final_result
-                st.session_state.analysis_completed = True
-    
-    if st.session_state.analysis_completed:
-        if st.button("إظهار النتائج", key="show_results"):
-            st.subheader("نتائج التقدير")
-            final_result = st.session_state.final_result
-            
-            st.write("**المهام المستخرجة**:")
-            for task in final_result.get("tasks", []):
-                st.write(f"- {task}")
-            
-            st.write("**إجمالي التكلفة**:")
-            total_cost = final_result.get("total_cost")
-            if total_cost is not None:
-                st.metric("التكلفة", f"${total_cost:,.2f}")
-            else:
-                st.error("فشل تقدير التكلفة")
-            
-            st.write("**تفاصيل التكلفة**:")
-            df_direct = pd.DataFrame(final_result["cost_breakdown"].get("direct_costs", {})).T
-            df_indirect = pd.DataFrame(final_result["cost_breakdown"].get("indirect_costs", {})).T
-            if not df_direct.empty:
-                st.write("التكاليف المباشرة:")
-                st.dataframe(df_direct.style.format({"cost": "{:,.2f}", "percentage": "{:.1f}%"}))
-            if not df_indirect.empty:
-                st.write("التكاليف غير المباشرة:")
-                st.dataframe(df_indirect.style.format({"cost": "{:,.2f}", "percentage": "{:.1f}%"}))
-            
-            st.write("**التفسير**:")
-            st.write(final_result.get("reasoning", "غير متوفر"))
-    
-    if st.button("عرض سجل العمليات"):
-        try:
-            with open("execution_log.txt", "r", encoding="utf-8") as f:
-                log_content = f.read()
-            st.text_area("سجل العمليات", log_content, height=300)
-            st.download_button(
-                label="تحميل السجل",
-                data=log_content,
-                file_name="execution_log.txt",
-                mime="text/plain"
-            )
-        except FileNotFoundError:
-            st.error("السجل غير متوفر")
-    
-    if st.button("العودة"):
-        st.session_state.analysis_completed = False
-        st.session_state.final_result = None
-        st.rerun()
-
-# دالة التحليل والتقدير (محدثة)
+# دالة التحليل والتقدير
 def analyze_and_estimate_multi_gpt(file_content, project_type, market_data):
     scope_response = scope_gpt_analyze(file_content, project_type)
     tasks = scope_response.get("tasks", [])
@@ -363,6 +267,131 @@ def analyze_and_estimate_multi_gpt(file_content, project_type, market_data):
     final_result = coordinate_results(simulations, market_data)
     logging.info(f"Final result: {final_result}")
     return final_result
+
+# الواجهة الرئيسية
+def main():
+    st.title("CostimAIze - تقدير ذكي للتكاليف")
+    
+    if "analysis_completed" not in st.session_state:
+        st.session_state.analysis_completed = False
+    if "final_result" not in st.session_state:
+        st.session_state.final_result = None
+    if "uploaded_files" not in st.session_state:
+        st.session_state.uploaded_files = []
+    
+    st.subheader("تفاصيل المشروع")
+    project_location = st.text_input("موقع المشروع:")
+    project_timeline = st.text_input("الجدول الزمني:")
+    project_type = st.selectbox("نوع المشروع:", ["Capital", "Maintenance", "Other"])
+    other_info = st.text_area("معلومات إضافية:")
+    
+    st.subheader("رفع نطاق العمل")
+    st.info("إذا كنت تستخدم جوال، تأكد من إذن الوصول إلى الملفات. الحد الأقصى 200 ميجابايت لكل ملف.")
+    uploaded_files = st.file_uploader(
+        "ارفع الملفات",
+        type=['docx', 'xlsx', 'pdf', 'png', 'jpg'],
+        accept_multiple_files=True,
+        key="file_uploader"
+    )
+    
+    # تحديث قائمة الملفات المرفوعة
+    if uploaded_files:
+        st.session_state.uploaded_files = uploaded_files
+        st.success("تم رفع الملفات بنجاح!")
+        for uploaded_file in st.session_state.uploaded_files:
+            st.write(f"- {uploaded_file.name} ({uploaded_file.size / 1024:.1f}KB)")
+    else:
+        if st.session_state.uploaded_files:
+            st.warning("تم إزالة الملفات المرفوعة. يرجى رفع ملفات جديدة.")
+            st.session_state.uploaded_files = []
+        else:
+            st.warning("لم يتم رفع أي ملفات بعد.")
+
+    # زر بدء التقدير
+    if st.session_state.uploaded_files:
+        if st.button("بدء التقدير", key="start_estimation"):
+            with st.spinner("جارٍ التحليل..."):
+                try:
+                    file_contents = []
+                    for uploaded_file in st.session_state.uploaded_files:
+                        content = read_file(uploaded_file)
+                        file_contents.append(f"File: {uploaded_file.name}\n{content}")
+                    
+                    project_details = f"""
+                    LOCATION: {project_location}
+                    TIMELINE: {project_timeline}
+                    TYPE: {project_type}
+                    OTHER: {other_info}
+                    """
+                    combined_content = project_details + "\n" + "\n".join(file_contents)
+                    
+                    market_data = dynamic_market_analysis(combined_content)
+                    if market_data.get("status") == "error":
+                        st.error(market_data["message"])
+                        logging.error(market_data["message"])
+                        return
+                    
+                    final_result = analyze_and_estimate_multi_gpt(combined_content, project_type, market_data)
+                    st.session_state.final_result = final_result
+                    st.session_state.analysis_completed = True
+                except Exception as e:
+                    st.error(f"فشل التحليل: {str(e)}")
+                    logging.error(f"تحليل نطاق العمل فشل: {str(e)}")
+    
+    # زر إظهار النتائج
+    if st.session_state.analysis_completed:
+        if st.button("إظهار النتائج", key="show_results"):
+            st.subheader("نتائج التقدير")
+            final_result = st.session_state.final_result
+            
+            st.write("**المهام المستخرجة**:")
+            for task in final_result.get("tasks", []):
+                st.write(f"- {task}")
+            
+            st.write("**إجمالي التكلفة**:")
+            total_cost = final_result.get("total_cost")
+            if total_cost is not None:
+                st.metric("التكلفة", f"${total_cost:,.2f}")
+            else:
+                st.error("فشل تقدير التكلفة")
+            
+            st.write("**تفاصيل التكلفة**:")
+            df_direct = pd.DataFrame(final_result["cost_breakdown"].get("direct_costs", {})).T
+            df_indirect = pd.DataFrame(final_result["cost_breakdown"].get("indirect_costs", {})).T
+            if not df_direct.empty:
+                st.write("التكاليف المباشرة:")
+                st.dataframe(df_direct.style.format({"cost": "{:,.2f}", "percentage": "{:.1f}%"}))
+            if not df_indirect.empty:
+                st.write("التكاليف غير المباشرة:")
+                st.dataframe(df_indirect.style.format({"cost": "{:,.2f}", "percentage": "{:.1f}%"}))
+            
+            st.write("**التفسير**:")
+            st.write(final_result.get("reasoning", "غير متوفر"))
+    
+    # زر عرض سجل العمليات
+    if st.button("عرض سجل العمليات", key="view_log"):
+        try:
+            with open("execution_log.txt", "r", encoding="utf-8") as f:
+                log_content = f.read()
+            if log_content.strip():
+                st.text_area("سجل العمليات", log_content, height=300)
+                st.download_button(
+                    label="تحميل السجل",
+                    data=log_content,
+                    file_name="execution_log.txt",
+                    mime="text/plain"
+                )
+            else:
+                st.warning("السجل فارغ. لم يتم تسجيل أي عمليات بعد.")
+        except FileNotFoundError:
+            st.error("السجل غير متوفر. حاول مرة أخرى لاحقًا.")
+    
+    # زر العودة
+    if st.button("العودة", key="reset"):
+        st.session_state.analysis_completed = False
+        st.session_state.final_result = None
+        st.session_state.uploaded_files = []
+        st.rerun()
 
 if __name__ == "__main__":
     main()
