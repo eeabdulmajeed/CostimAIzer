@@ -26,13 +26,20 @@ except Exception as e:
 # إعداد OpenAI API
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# دالة لتحليل السوق ديناميكيًا (بدون Fallback)
+# دالة لتحليل السوق ديناميكيًا (مع بديل مؤقت)
 def dynamic_market_analysis(context):
     try:
         prompt = f"""
         Analyze market conditions for the project: {context}.
         Return JSON with cost items (direct/indirect), ranges, and market impact.
-        Do not use hardcoded values. If data is unavailable, return an error message.
+        If specific data is unavailable, provide estimated ranges based on typical industry standards for Saudi Arabia.
+        Example format:
+        {{
+            "status": "success",
+            "items": {{"transformers": 500000, "GIS_system": 300000, "labor": 200000, ...}},
+            "expected_range": {{"min": 1000000, "max": 5000000}},
+            "market_conditions": "Stable market with moderate inflation"
+        }}
         """
         response = openai.chat.completions.create(
             model="gpt-4-turbo",
@@ -44,11 +51,18 @@ def dynamic_market_analysis(context):
         return market_data
     except Exception as e:
         logging.error(f"خطأ في تحليل السوق: {str(e)}")
+        # بديل مؤقت إذا فشل التحليل
         return {
-            "status": "error",
-            "message": "فشل تحليل السوق، يُرجى مراجعة يدوية",
-            "items": {},
-            "expected_range": {"min": 0, "max": float("inf")}
+            "status": "fallback",
+            "items": {
+                "transformers": 500000,
+                "GIS_system": 300000,
+                "labor": 200000,
+                "civil_works": 150000,
+                "SCADA": 100000
+            },
+            "expected_range": {"min": 1000000, "max": 5000000},
+            "market_conditions": "افتراضي: السوق مستقر مع تضخم معتدل (البيانات افتراضية وتحتاج مراجعة)"
         }
 
 # دالة لتحليل نطاق العمل (مع دعم OCR)
@@ -85,6 +99,7 @@ def market_gpt_estimate(scope_data, market_data):
     try:
         prompt = f"""
         You are MarketGPT. Estimate the cost based on scope and market data.
+        If exact market data is unavailable, provide an estimated cost based on typical industry standards for Saudi Arabia.
         Return JSON:
         {{
             "total_cost": <number or null>,
@@ -106,10 +121,15 @@ def market_gpt_estimate(scope_data, market_data):
         return parsed_response
     except Exception as e:
         logging.error(f"MarketGPT failed: {str(e)}")
+        # بديل مؤقت إذا فشل التقدير
+        total_cost = sum(market_data.get("items", {}).values()) * 1.2  # زيادة 20% كتقدير احتياطي
         return {
-            "total_cost": None,
-            "cost_breakdown": {},
-            "reasoning": f"Estimation failed: {str(e)}"
+            "total_cost": total_cost if total_cost > 0 else None,
+            "cost_breakdown": {
+                "direct_costs": market_data.get("items", {}),
+                "indirect_costs": {"overheads": total_cost * 0.2}
+            },
+            "reasoning": f"تقدير افتراضي بسبب فشل التحليل: {str(e)}. البيانات مستندة إلى معايير افتراضية وتحتاج مراجعة."
         }
 
 # دالة للتحقق من المنطقية (مع طبقة الاعتراض)
@@ -231,22 +251,17 @@ def analyze_and_estimate_multi_gpt(file_content, project_type, market_data):
     contradictions = scope_response.get("contradictions", [])
     missing_details = scope_response.get("missing_details", [])
     
+    # لا توقف التقدير بسبب التناقضات، بل أضفها إلى التقرير
     if contradictions:
-        logging.warning(f"Contradictions: {contradictions}")
-        return {
-            "tasks": tasks,
-            "contradictions": contradictions,
-            "missing_details": missing_details,
-            "total_cost": None,
-            "cost_breakdown": {},
-            "reasoning": "تم إيقاف التقدير بسبب تناقضات"
-        }
+        logging.warning(f"Contradictions found: {contradictions}")
     
     simulations = []
     for i in range(10):
         logging.info(f"Simulation {i+1}/10")
         market_response = market_gpt_estimate(file_content, market_data)
         market_response["tasks"] = tasks
+        market_response["contradictions"] = contradictions
+        market_response["missing_details"] = missing_details
         simulations.append(market_response)
     
     costs = [sim["total_cost"] for sim in simulations if sim["total_cost"] is not None]
@@ -257,14 +272,16 @@ def analyze_and_estimate_multi_gpt(file_content, project_type, market_data):
             logging.error(f"Validation failed: {str(e)}")
             return {
                 "tasks": tasks,
-                "contradictions": [],
-                "missing_details": [],
+                "contradictions": contradictions,
+                "missing_details": missing_details,
                 "total_cost": None,
                 "cost_breakdown": {},
                 "reasoning": f"فشل التحقق: {str(e)}"
             }
     
     final_result = coordinate_results(simulations, market_data)
+    final_result["contradictions"] = contradictions
+    final_result["missing_details"] = missing_details
     logging.info(f"Final result: {final_result}")
     return final_result
 
@@ -347,6 +364,16 @@ def main():
             st.write("**المهام المستخرجة**:")
             for task in final_result.get("tasks", []):
                 st.write(f"- {task}")
+            
+            if final_result.get("contradictions"):
+                st.warning("**تناقضات في نطاق العمل (يرجى المراجعة)**:")
+                for contradiction in final_result["contradictions"]:
+                    st.write(f"- {contradiction}")
+            
+            if final_result.get("missing_details"):
+                st.warning("**تفاصيل مفقودة (يرجى التحقق)**:")
+                for detail in final_result["missing_details"]:
+                    st.write(f"- {detail}")
             
             st.write("**إجمالي التكلفة**:")
             total_cost = final_result.get("total_cost")
