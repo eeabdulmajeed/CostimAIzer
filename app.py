@@ -2,11 +2,10 @@ import streamlit as st
 import openai
 import json
 import logging
-import pdfplumber
-from docx import Document
+import pytesseract
+from PIL import Image
 import pandas as pd
 import numpy as np
-import requests
 from io import BytesIO
 from datetime import datetime
 
@@ -14,47 +13,43 @@ from datetime import datetime
 logging.basicConfig(
     filename='execution_log.txt',
     level=logging.INFO,
-    format='%(asctime)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
 # إعداد OpenAI API
-openai.api_key = st.secrets["OPENAI_API_KEY"]  # تأكد من إضافة مفتاح API في إعدادات Streamlit
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# دوال مساعدة لبيانات السوق (كما هي في الأصل)
-def get_market_news():
+# دالة لتحليل السوق ديناميكيًا (بدون Fallback)
+def dynamic_market_analysis(context):
     try:
-        response = requests.get("https://newsapi.org/v2/everything?q=construction+market", 
-                               params={"apiKey": st.secrets["NEWS_API_KEY"]})
-        news = response.json().get("articles", [])
-        return news[0]["description"] if news else "No news available"
+        prompt = f"""
+        Analyze market conditions for the project: {context}.
+        Return JSON with cost items (direct/indirect), ranges, and market impact.
+        Do not use hardcoded values. If data is unavailable, return an error message.
+        """
+        response = openai.chat.completions.create(
+            model="gpt-4-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
+        market_data = json.loads(response.choices[0].message.content)
+        logging.info("تحليل السوق اكتمل")
+        return market_data
     except Exception as e:
-        logging.error(f"Error fetching market news: {str(e)}")
-        return "Simulated news: Global markets stable, slight material price increase."
+        logging.error(f"خطأ في تحليل السوق: {str(e)}")
+        return {
+            "status": "error",
+            "message": "فشل تحليل السوق، يُرجى مراجعة يدوية",
+            "items": {},
+            "expected_range": {"min": 0, "max": float("inf")}
+        }
 
-def get_material_prices():
-    return {
-        "steel": 700,
-        "concrete": 300,
-        "cement": 150,
-        "labor_hourly_rate": 50,
-        "equipment_rental_daily": 200,
-        "timber": 400
-    }
-
-def get_market_data():
-    return {
-        "news": get_market_news(),
-        "prices": get_material_prices(),
-        "inflation": 1.06,
-        "interest": 0.045
-    }
-
-# دالة ScopeGPT لتحليل نطاق العمل
+# دالة لتحليل نطاق العمل (مع دعم OCR)
 def scope_gpt_analyze(file_content, project_type):
     try:
         prompt = f"""
-        You are ScopeGPT. Analyze the following scope of work and extract tasks (direct and indirect),
-        contradictions, and missing details. Return a JSON with the following structure:
+        You are ScopeGPT. Analyze the scope of work and extract tasks (direct and indirect),
+        contradictions, and missing details. Return JSON:
         {{
             "tasks": ["task1", "task2", ...],
             "contradictions": ["contradiction1", ...],
@@ -68,10 +63,8 @@ def scope_gpt_analyze(file_content, project_type):
             messages=[{"role": "system", "content": prompt}]
         )
         raw_response = response.choices[0].message.content
-        logging.info(f"ScopeGPT raw response: {raw_response}")
-
-        parsed_response = json.loads(raw_response)
-        return parsed_response
+        logging.info(f"ScopeGPT response: {raw_response}")
+        return json.loads(raw_response)
     except Exception as e:
         logging.error(f"ScopeGPT failed: {str(e)}")
         return {
@@ -80,18 +73,17 @@ def scope_gpt_analyze(file_content, project_type):
             "missing_details": [f"Error in scope analysis: {str(e)}"]
         }
 
-# دالة MarketGPT لتقدير التكلفة (مع تحسين لضمان JSON صالح)
+# دالة لتقدير التكلفة
 def market_gpt_estimate(scope_data, market_data):
     try:
         prompt = f"""
-        You are MarketGPT. Estimate the cost based on the scope and market data.
-        Return a valid JSON with the following structure:
+        You are MarketGPT. Estimate the cost based on scope and market data.
+        Return JSON:
         {{
             "total_cost": <number or null>,
             "cost_breakdown": {{ "direct_costs": {{}}, "indirect_costs": {{}} }},
             "reasoning": "<explanation>"
         }}
-        Ensure the JSON is syntactically correct. Escape any special characters in strings.
         Scope: {scope_data}
         Market Data: {market_data}
         """
@@ -100,21 +92,11 @@ def market_gpt_estimate(scope_data, market_data):
             messages=[{"role": "system", "content": prompt}]
         )
         raw_response = response.choices[0].message.content
-        logging.info(f"MarketGPT raw response: {raw_response}")
-
-        # تحليل JSON مع التحقق
+        logging.info(f"MarketGPT response: {raw_response}")
         parsed_response = json.loads(raw_response)
         if "total_cost" not in parsed_response or "cost_breakdown" not in parsed_response:
-            raise ValueError("Invalid MarketGPT response: missing required fields")
-
+            raise ValueError("Invalid MarketGPT response")
         return parsed_response
-    except json.JSONDecodeError as e:
-        logging.error(f"MarketGPT JSON parsing failed: {str(e)} - Raw response: {raw_response}")
-        return {
-            "total_cost": None,
-            "cost_breakdown": {},
-            "reasoning": f"JSON parsing failed: {str(e)}"
-        }
     except Exception as e:
         logging.error(f"MarketGPT failed: {str(e)}")
         return {
@@ -123,248 +105,264 @@ def market_gpt_estimate(scope_data, market_data):
             "reasoning": f"Estimation failed: {str(e)}"
         }
 
-# دالة ValidatorGPT للتحقق من التكاليف
-def validate_cost(costs):
+# دالة للتحقق من المنطقية (مع طبقة الاعتراض)
+def validate_cost(costs, market_data):
     try:
-        # التأكد من أن جميع القيم أرقام
-        validated_costs = [float(cost) for cost in costs]
+        validated_costs = [float(cost) for cost in costs if cost is not None]
+        if not validated_costs:
+            raise ValueError("No valid costs provided")
+        
+        # طبقة الاعتراض الداخلي
+        expected_range = market_data.get("expected_range", {"min": 0, "max": float("inf")})
+        min_cost, max_cost = expected_range.get("min", 0), expected_range.get("max", float("inf"))
+        for cost in validated_costs:
+            if not (min_cost <= cost <= max_cost):
+                raise ValueError(f"Cost {cost} outside expected range [{min_cost}, {max_cost}]")
+            if cost < 0:
+                raise ValueError("Costs cannot be negative")
+        
         logging.info(f"Validated costs: {validated_costs}")
-
-        # التحقق من المنطقية
-        if any(cost < 0 for cost in validated_costs):
-            raise ValueError("Costs cannot be negative")
-
         return validated_costs
     except Exception as e:
-        logging.error(f"Error in validate_cost: {str(e)} - Costs: {costs}")
+        logging.error(f"Validation failed: {str(e)}")
         raise
 
-# دالة CoordinatorGPT لدمج النتائج (بدون Fallback)
-def coordinate_results(simulations):
-    valid_simulations = []
+# دالة Monte Carlo
+def monte_carlo_simulation(simulations, market_data):
     valid_costs = []
-
+    valid_simulations = []
+    
     for sim in simulations:
         try:
-            # تنظيف الاستجابة من الأحرف الخاصة
-            if "reasoning" in sim:
-                sim["reasoning"] = sim["reasoning"].replace('"', '\\"').replace('\n', ' ')
             if sim.get("total_cost") is not None:
+                # إضافة تغيير طفيف (±5%)
+                variation = np.random.normal(0, 0.05 * sim["total_cost"])
+                adjusted_cost = max(0, sim["total_cost"] + variation)
+                valid_costs.append(adjusted_cost)
                 valid_simulations.append(sim)
-                valid_costs.append(sim["total_cost"])
         except Exception as e:
-            logging.error(f"Error processing simulation result: {str(e)} - Simulation: {sim}")
+            logging.error(f"Simulation error: {str(e)}")
             continue
+    
+    if not valid_costs:
+        logging.error("No valid Monte Carlo costs")
+        return None, []
+    
+    # كشف القيم الشاذة
+    avg_cost = np.mean(valid_costs)
+    outliers = [c for c in valid_costs if abs(c - avg_cost) > 2 * np.std(valid_costs)]
+    logging.info(f"Monte Carlo: avg={avg_cost}, outliers={len(outliers)}")
+    return avg_cost, valid_simulations
 
+# دالة لدمج النتائج
+def coordinate_results(simulations, market_data):
+    valid_simulations = [s for s in simulations if s.get("total_cost") is not None]
     if not valid_simulations:
-        logging.error("No valid simulations found")
+        logging.error("No valid simulations")
         return {
-            "tasks": simulations[0].get("tasks", []),
+            "tasks": [],
             "contradictions": [],
             "missing_details": [],
             "total_cost": None,
             "cost_breakdown": {},
-            "reasoning": "Failed to estimate cost: No valid simulations available"
+            "reasoning": "No valid simulations available"
         }
-
-    # اختيار أفضل محاكاة (مثلاً: أعلى تكلفة للحذر)
+    
+    avg_cost, valid_simulations = monte_carlo_simulation(simulations, market_data)
+    if avg_cost is None:
+        return {
+            "tasks": [],
+            "contradictions": [],
+            "missing_details": [],
+            "total_cost": None,
+            "cost_breakdown": {},
+            "reasoning": "Monte Carlo simulation failed"
+        }
+    
+    # اختيار أفضل محاكاة
     best_simulation = max(valid_simulations, key=lambda x: x["total_cost"])
-    logging.info(f"Valid costs: {valid_costs}, Selected cost: {best_simulation['total_cost']}")
-
+    logging.info(f"Selected cost: {avg_cost}")
+    
+    # إنشاء تقرير تفسيري
+    total = sum(v for v in best_simulation["cost_breakdown"]["direct_costs"].values()) + \
+            sum(v for v in best_simulation["cost_breakdown"]["indirect_costs"].values())
+    breakdown = {
+        "direct_costs": {k: {"cost": v, "percentage": v / total * 100}
+                         for k, v in best_simulation["cost_breakdown"]["direct_costs"].items()},
+        "indirect_costs": {k: {"cost": v, "percentage": v / total * 100}
+                           for k, v in best_simulation["cost_breakdown"]["indirect_costs"].items()}
+    }
+    
     return {
         "tasks": best_simulation.get("tasks", []),
         "contradictions": [],
         "missing_details": [],
-        "total_cost": best_simulation["total_cost"],
-        "cost_breakdown": best_simulation.get("cost_breakdown", {}),
-        "reasoning": f"Cost selected from {len(valid_simulations)} valid simulations"
+        "total_cost": avg_cost,
+        "cost_breakdown": breakdown,
+        "reasoning": f"Cost estimated from {len(valid_simulations)} simulations, market impact: {market_data.get('market_conditions', 'N/A')}"
     }
 
-# دالة التحليل والتقدير باستخدام Multi-GPT
+# دالة لقراءة الملفات (مع OCR)
+def read_file(file):
+    try:
+        if file.name.endswith(('.pdf', '.png', '.jpg')):
+            image = Image.open(file)
+            text = pytesseract.image_to_string(image, lang="eng+ara")
+            return text
+        elif file.name.endswith('.docx'):
+            from docx import Document
+            doc = Document(file)
+            return "\n".join([para.text for para in doc.paragraphs])
+        elif file.name.endswith('.xlsx'):
+            df = pd.read_excel(file)
+            return df.to_string()
+        else:
+            return file.read().decode('utf-8')
+    except Exception as e:
+        logging.error(f"File read error: {str(e)}")
+        return ""
+
+# الواجهة الرئيسية
+def main():
+    st.title("CostimAIze - تقدير ذكي للتكاليف")
+    
+    if "analysis_completed" not in st.session_state:
+        st.session_state.analysis_completed = False
+    if "final_result" not in st.session_state:
+        st.session_state.final_result = None
+    
+    st.subheader("تفاصيل المشروع")
+    project_location = st.text_input("موقع المشروع:")
+    project_timeline = st.text_input("الجدول الزمني:")
+    project_type = st.selectbox("نوع المشروع:", ["Capital", "Maintenance", "Other"])
+    other_info = st.text_area("معلومات إضافية:")
+    
+    st.subheader("رفع نطاق العمل")
+    uploaded_files = st.file_uploader(
+        "ارفع الملفات",
+        type=['docx', 'xlsx', 'pdf', 'png', 'jpg'],
+        accept_multiple_files=True
+    )
+    
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
+            st.write(f"{uploaded_file.name} ({uploaded_file.size / 1024:.1f}KB)")
+        
+        if st.button("بدء التقدير"):
+            with st.spinner("جارٍ التحليل..."):
+                file_contents = []
+                for uploaded_file in uploaded_files:
+                    content = read_file(uploaded_file)
+                    file_contents.append(f"File: {uploaded_file.name}\n{content}")
+                
+                project_details = f"""
+                LOCATION: {project_location}
+                TIMELINE: {project_timeline}
+                TYPE: {project_type}
+                OTHER: {other_info}
+                """
+                combined_content = project_details + "\n" + "\n".join(file_contents)
+                
+                market_data = dynamic_market_analysis(combined_content)
+                if market_data.get("status") == "error":
+                    st.error(market_data["message"])
+                    return
+                
+                final_result = analyze_and_estimate_multi_gpt(combined_content, project_type, market_data)
+                st.session_state.final_result = final_result
+                st.session_state.analysis_completed = True
+    
+    if st.session_state.analysis_completed:
+        if st.button("إظهار النتائج", key="show_results"):
+            st.subheader("نتائج التقدير")
+            final_result = st.session_state.final_result
+            
+            st.write("**المهام المستخرجة**:")
+            for task in final_result.get("tasks", []):
+                st.write(f"- {task}")
+            
+            st.write("**إجمالي التكلفة**:")
+            total_cost = final_result.get("total_cost")
+            if total_cost is not None:
+                st.metric("التكلفة", f"${total_cost:,.2f}")
+            else:
+                st.error("فشل تقدير التكلفة")
+            
+            st.write("**تفاصيل التكلفة**:")
+            df_direct = pd.DataFrame(final_result["cost_breakdown"].get("direct_costs", {})).T
+            df_indirect = pd.DataFrame(final_result["cost_breakdown"].get("indirect_costs", {})).T
+            if not df_direct.empty:
+                st.write("التكاليف المباشرة:")
+                st.dataframe(df_direct.style.format({"cost": "{:,.2f}", "percentage": "{:.1f}%"}))
+            if not df_indirect.empty:
+                st.write("التكاليف غير المباشرة:")
+                st.dataframe(df_indirect.style.format({"cost": "{:,.2f}", "percentage": "{:.1f}%"}))
+            
+            st.write("**التفسير**:")
+            st.write(final_result.get("reasoning", "غير متوفر"))
+    
+    if st.button("عرض سجل العمليات"):
+        try:
+            with open("execution_log.txt", "r", encoding="utf-8") as f:
+                log_content = f.read()
+            st.text_area("سجل العمليات", log_content, height=300)
+            st.download_button(
+                label="تحميل السجل",
+                data=log_content,
+                file_name="execution_log.txt",
+                mime="text/plain"
+            )
+        except FileNotFoundError:
+            st.error("السجل غير متوفر")
+    
+    if st.button("العودة"):
+        st.session_state.analysis_completed = False
+        st.session_state.final_result = None
+        st.rerun()
+
+# دالة التحليل والتقدير (محدثة)
 def analyze_and_estimate_multi_gpt(file_content, project_type, market_data):
-    # استخراج المهام
     scope_response = scope_gpt_analyze(file_content, project_type)
     tasks = scope_response.get("tasks", [])
     contradictions = scope_response.get("contradictions", [])
     missing_details = scope_response.get("missing_details", [])
-
+    
     if contradictions:
-        logging.warning(f"Contradictions found in scope: {contradictions}")
+        logging.warning(f"Contradictions: {contradictions}")
         return {
             "tasks": tasks,
             "contradictions": contradictions,
             "missing_details": missing_details,
             "total_cost": None,
             "cost_breakdown": {},
-            "reasoning": "Estimation aborted due to contradictions in scope"
+            "reasoning": "تم إيقاف التقدير بسبب تناقضات"
         }
-
-    # تشغيل المحاكاة
+    
     simulations = []
     for i in range(10):
-        logging.info(f"Running simulation {i+1}/10")
+        logging.info(f"Simulation {i+1}/10")
         market_response = market_gpt_estimate(file_content, market_data)
-        market_response["tasks"] = tasks  # إضافة المهام إلى كل محاكاة
+        market_response["tasks"] = tasks
         simulations.append(market_response)
-
-    # التحقق من التكاليف
+    
     costs = [sim["total_cost"] for sim in simulations if sim["total_cost"] is not None]
     if costs:
         try:
-            validate_cost(costs)
+            validate_cost(costs, market_data)
         except Exception as e:
-            logging.error(f"Cost validation failed: {str(e)}")
+            logging.error(f"Validation failed: {str(e)}")
             return {
                 "tasks": tasks,
                 "contradictions": [],
                 "missing_details": [],
                 "total_cost": None,
                 "cost_breakdown": {},
-                "reasoning": f"Cost validation failed: {str(e)}"
+                "reasoning": f"فشل التحقق: {str(e)}"
             }
-
-    # دمج النتائج
-    final_result = coordinate_results(simulations)
-    logging.info(f"Estimation completed: {final_result}")
+    
+    final_result = coordinate_results(simulations, market_data)
+    logging.info(f"Final result: {final_result}")
     return final_result
-
-# دالة لقراءة الملفات
-def read_file(file):
-    if file.name.endswith('.pdf'):
-        with pdfplumber.open(file) as pdf:
-            text = ""
-            for page in pdf.pages:
-                text += page.extract_text() or ""
-            return text
-    elif file.name.endswith('.docx'):
-        doc = Document(file)
-        return "\n".join([para.text for para in doc.paragraphs])
-    elif file.name.endswith('.xlsx'):
-        df = pd.read_excel(file)
-        return df.to_string()
-    else:
-        return file.read().decode('utf-8')
-
-# الواجهة الرئيسية باستخدام Streamlit
-def main():
-    st.title("CostimAIze - Project Cost Estimation")
-
-    # تهيئة session_state إذا لم يكن موجودًا
-    if "analysis_completed" not in st.session_state:
-        st.session_state.analysis_completed = False
-    if "final_result" not in st.session_state:
-        st.session_state.final_result = None
-
-    # إدخال معلومات اختيارية
-    st.subheader("Project Details (Optional)")
-    project_location = st.text_input("Project Location:")
-    project_timeline = st.text_input("Project Timeline:")
-    project_type = st.selectbox("Project Type:", ["Capital", "Maintenance", "Other"])
-    other_info = st.text_area("Other Information:")
-
-    # رفع نطاق العمل
-    st.subheader("Upload Scope of Work")
-    uploaded_files = st.file_uploader(
-        "Drag and drop files here",
-        type=['doc', 'docx', 'xlsx', 'pdf'],
-        accept_multiple_files=True,
-        help="Limit 200MB per file • DOC, XLSX, PDF files"
-    )
-
-    if uploaded_files:
-        for uploaded_file in uploaded_files:
-            st.write(f"{uploaded_file.name} {uploaded_file.size / 1024:.1f}KB")
-            st.button("Remove", key=f"remove_{uploaded_file.name}")
-
-        st.success("Files uploaded successfully!")
-
-        # زر بدء التقدير
-        if st.button("Proceed to Estimate Cost"):
-            with st.spinner("Processing... Please wait."):
-                # قراءة الملفات
-                file_contents = []
-                for uploaded_file in uploaded_files:
-                    content = read_file(uploaded_file)
-                    file_contents.append(f"File: {uploaded_file.name}\n{content}")
-
-                # جمع المعلومات
-                project_details = f"""
-                PROJECT LOCATION: {project_location}
-                PROJECT TIMELINE: {project_timeline}
-                PROJECT TYPE: {project_type}
-                OTHER INFORMATION: {other_info}
-                """
-                combined_content = project_details + "\n" + "\n".join(file_contents)
-
-                # جلب بيانات السوق
-                market_data = get_market_data()
-
-                # تشغيل التحليل
-                final_result = analyze_and_estimate_multi_gpt(combined_content, project_type, market_data)
-
-                # تخزين النتائج في session_state
-                st.session_state.final_result = final_result
-                st.session_state.analysis_completed = True
-
-    # زر "اظهر النتائج" (يظهر بعد انتهاء التحليل)
-    if st.session_state.analysis_completed:
-        if st.button("اظهر النتائج"):
-            st.subheader("Estimation Results")
-            final_result = st.session_state.final_result
-
-            # عرض النتائج
-            st.write("**Tasks Extracted:**")
-            for task in final_result.get("tasks", []):
-                st.write(f"- {task}")
-
-            st.write("**Total Cost:**")
-            total_cost = final_result.get("total_cost")
-            if total_cost is not None:
-                st.write(f"${total_cost:,.2f}")
-            else:
-                st.error("Cost estimation failed.")
-
-            st.write("**Cost Breakdown:**")
-            st.json(final_result.get("cost_breakdown", {}))
-
-            st.write("**Reasoning:**")
-            st.write(final_result.get("reasoning", "No reasoning provided."))
-
-    # زر عرض سجل التنفيذ
-    if st.button("View Execution Log"):
-        try:
-            with open("execution_log.txt", "r") as f:
-                log_content = f.read()
-            st.subheader("Execution Log")
-            log_area = st.text_area("Log Content (Copyable)", log_content, height=300)
-            # زر النسخ (باستخدام JavaScript)
-            st.markdown(
-                """
-                <button onclick="navigator.clipboard.writeText(document.getElementById('log-content').value)">
-                    Copy to Clipboard
-                </button>
-                <script>
-                    document.getElementById('log-content').id = 'log-content';
-                </script>
-                """,
-                unsafe_allow_html=True
-            )
-            # زر التحميل
-            with open("execution_log.txt", "rb") as f:
-                st.download_button(
-                    label="Download Execution Log",
-                    data=f,
-                    file_name="execution_log.txt",
-                    mime="text/plain"
-                )
-        except FileNotFoundError:
-            st.error("Execution log not found.")
-
-    # زر العودة إلى الـ Dashboard
-    if st.button("Back to Dashboard"):
-        st.session_state.analysis_completed = False
-        st.session_state.final_result = None
-        st.experimental_rerun()
 
 if __name__ == "__main__":
     main()
