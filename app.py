@@ -5,7 +5,7 @@ from io import BytesIO
 import pytesseract
 from PIL import Image, ImageEnhance
 import re
-from pdf2image import convert_from_bytes
+from pdf2image import convert_from_path
 import nltk
 from nltk.tokenize import word_tokenize
 from nltk.tag import pos_tag
@@ -13,6 +13,12 @@ from collections import defaultdict
 import openai
 import os
 from datetime import datetime
+import tempfile
+
+# ملاحظات هامة للمطور:
+# 1. هذا الكود يعتمد على ركائز أساسية: دوال OpenAI (ScopeGPT، MarketGPT، ReviewGPT)، دوال NLP، والتفاعل بين النماذج.
+# 2. يُمنع حذف أو تعديل هذه الركائز دون استشارة المالك، لأنها أساس عمل التطبيق.
+# 3. أي تعديلات يجب أن تكون تراكمية مع الحفاظ على الوظائف القائمة.
 
 # إعداد مسار مؤقت لتخزين بيانات NLTK
 nltk_data_path = "/tmp/nltk_data"
@@ -46,7 +52,7 @@ def log_action(action):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["execution_log"].append(f"[{timestamp}] {action}")
 
-# دالة لتحسين جودة الصور قبل OCR
+# ركيزة أساسية: تحسين جودة الصورة - لا يجوز حذفها
 def preprocess_image(image):
     log_action("تحسين جودة الصورة قبل OCR")
     image = image.convert('L')  # تحويل إلى تدرج الرمادي
@@ -55,7 +61,7 @@ def preprocess_image(image):
     log_action("تم تحسين جودة الصورة")
     return image
 
-# دالة لاستخراج النصوص من الصور (OCR)
+# ركيزة أساسية: استخراج النص من الصورة - لا يجوز حذفها
 def extract_text_from_image(image):
     log_action("بدء استخراج النص من الصورة")
     try:
@@ -67,24 +73,33 @@ def extract_text_from_image(image):
         log_action(f"خطأ في استخراج النص: {str(e)}")
         return f"خطأ في استخراج النص: {str(e)}"
 
-# دالة لاستخراج النصوص من PDF
+# ركيزة أساسية: استخراج النص من PDF - لا يجوز حذفها
 def extract_text_from_pdf(uploaded_file):
     log_action("بدء استخراج النص من PDF")
     try:
-        images = convert_from_bytes(uploaded_file.read(), size=(2000, 2000))
+        # إنشاء ملف مؤقت لحفظ الملف المرفوع
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+            temp_file.write(uploaded_file.read())
+            temp_file_path = temp_file.name
+
+        # تحويل PDF إلى صور باستخدام الملف المؤقت
+        images = convert_from_path(temp_file_path, size=(2000, 2000))
         text = ""
         for i, image in enumerate(images):
             st.write(f"معالجة الصفحة {i + 1} من {len(images)}...")
             log_action(f"معالجة الصفحة {i + 1} من {len(images)}")
             page_text = extract_text_from_image(image)
             text += page_text + "\n"
+
+        # حذف الملف المؤقت بعد المعالجة
+        os.remove(temp_file_path)
         log_action("اكتمل استخراج النص من PDF")
         return text
     except Exception as e:
         log_action(f"خطأ في قراءة الملف: {str(e)}")
         return f"خطأ في قراءة الملف: {str(e)}"
 
-# دالة لتحليل النص واستخراج المهام باستخدام NLP
+# ركيزة أساسية: استخراج المهام باستخدام NLP - لا يجوز حذفها
 def extract_tasks(text):
     log_action("بدء استخراج المهام باستخدام NLP")
     sentences = text.split('\n')
@@ -98,7 +113,7 @@ def extract_tasks(text):
     log_action(f"تم استخراج {len(tasks)} مهمة")
     return tasks
 
-# دالة لتحليل نطاق العمل باستخدام OpenAI (ScopeGPT)
+# ركيزة أساسية: تحليل نطاق العمل باستخدام ScopeGPT - لا يجوز حذفها
 def analyze_scope(text):
     log_action("بدء تحليل نطاق العمل باستخدام OpenAI")
     tasks = extract_tasks(text)
@@ -135,7 +150,7 @@ def analyze_scope(text):
         st.error(f"Error in scope analysis: {str(e)}")
     return tasks, direct_cost_items, indirect_cost_items, missing_details
 
-# دالة لجلب بيانات السوق باستخدام OpenAI (MarketGPT)
+# ركيزة أساسية: جلب بيانات السوق باستخدام MarketGPT - لا يجوز حذفها
 def fetch_market_data(text, direct_cost_items, indirect_cost_items):
     log_action("بدء جلب بيانات السوق")
     market_data = {
@@ -203,7 +218,7 @@ def fetch_market_data(text, direct_cost_items, indirect_cost_items):
         st.error(f"Error fetching market data: {str(e)}")
     return market_data, reasoning
 
-# دالة للتحقق من النتائج بين النماذج (Validate)
+# ركيزة أساسية: التحقق من النتائج بين النماذج - لا يجوز حذفها
 def validate(scope_results, market_results):
     log_action("بدء التحقق من النتائج")
     discrepancies = []
@@ -224,7 +239,7 @@ def validate(scope_results, market_results):
     log_action(f"تم العثور على {len(discrepancies)} تناقض")
     return discrepancies
 
-# دالة للتحكيم بين النماذج (Arbitrate)
+# ركيزة أساسية: التحكيم بين النماذج - لا يجوز حذفها
 def arbitrate(discrepancies, scope_results, market_results):
     log_action("بدء التحكيم في التناقضات")
     reasoning = []
@@ -270,7 +285,7 @@ def arbitrate(discrepancies, scope_results, market_results):
     log_action("اكتمل التحكيم في التناقضات")
     return market_data, reasoning
 
-# دالة لتقدير التكلفة باستخدام OpenAI (ReviewGPT)
+# ركيزة أساسية: تقدير التكلفة باستخدام ReviewGPT - لا يجوز حذفها
 def cautious_pricing(scope_results, market_results):
     log_action("بدء تقدير التكلفة")
     total_cost = 0.0
@@ -345,47 +360,60 @@ def cautious_pricing(scope_results, market_results):
     return total_cost, direct_costs, indirect_costs, reasoning
 
 # واجهة Streamlit
-st.title("CostimAIzer - تقدير التكاليف")
-st.subheader("اختر الخدمة التي تريدها")
+# إذا لم يتم اختيار خدمة بعد، اعرض الصفحة الرئيسية
+if "service" not in st.session_state:
+    st.session_state["service"] = None
 
-# إضافة أيقونات للخدمات
-col1, col2, col3 = st.columns(3)
+# الصفحة الرئيسية
+if st.session_state["service"] is None:
+    st.title("CostimAIzer - تقدير التكاليف")
+    st.subheader("اختر الخدمة التي تريدها")
 
-with col1:
-    if st.button("📊 تقدير التكلفة"):
-        st.session_state["service"] = "estimate"
+    col1, col2, col3 = st.columns(3)
 
-with col2:
-    if st.button("💰 تحليل الأسعار"):
-        st.session_state["service"] = "analyze"
+    with col1:
+        if st.button("📊 تقدير التكلفة"):
+            st.session_state["service"] = "estimate"
+            st.experimental_rerun()  # إعادة تشغيل الصفحة لعرض الخدمة المختارة
 
-with col3:
-    if st.button("📜 أرشفة وتدريب"):
-        st.session_state["service"] = "archive"
+    with col2:
+        if st.button("💰 تحليل الأسعار"):
+            st.session_state["service"] = "analyze"
+            st.experimental_rerun()
 
-# Dashboard
-st.subheader("إحصائيات الأعمال")
-st.write("عدد التقديرات: 10")  # مثال
-st.write("متوسط التكلفة: 45,000 ريال")  # مثال
+    with col3:
+        if st.button("📜 أرشفة وتدريب"):
+            st.session_state["service"] = "archive"
+            st.experimental_rerun()
 
-# عرض السجل وزر التحميل
-st.subheader("سجل التنفيذ")
-if st.session_state["execution_log"]:
-    log_text = "\n".join(st.session_state["execution_log"])
-    st.text_area("سجل العمليات", log_text, height=200)
-    st.download_button(
-        label="تحميل سجل التنفيذ",
-        data=log_text,
-        file_name="execution_log.txt",
-        mime="text/plain"
-    )
-else:
-    st.write("لا توجد عمليات مسجلة بعد.")
+    # Dashboard
+    st.subheader("إحصائيات الأعمال")
+    st.write("عدد التقديرات: 10")  # مثال
+    st.write("متوسط التكلفة: 45,000 ريال")  # مثال
+
+    # عرض السجل وزر التحميل
+    st.subheader("سجل التنفيذ")
+    if st.session_state["execution_log"]:
+        log_text = "\n".join(st.session_state["execution_log"])
+        st.text_area("سجل العمليات", log_text, height=200)
+        st.download_button(
+            label="تحميل سجل التنفيذ",
+            data=log_text,
+            file_name="execution_log.txt",
+            mime="text/plain"
+        )
+    else:
+        st.write("لا توجد عمليات مسجلة بعد.")
 
 # التعامل مع الخدمة المختارة
-if "service" in st.session_state:
+else:
+    # زر للعودة إلى الصفحة الرئيسية
+    if st.button("العودة إلى الصفحة الرئيسية"):
+        st.session_state["service"] = None
+        st.experimental_rerun()
+
     if st.session_state["service"] == "estimate":
-        st.subheader("تقدير التكلفة")
+        st.title("تقدير التكلفة")
         uploaded_file = st.file_uploader("ارفع ملف الصورة أو PDF", type=["png", "jpg", "jpeg", "pdf"], key="file_uploader_1")
         if uploaded_file is not None:
             if uploaded_file.type == "application/pdf":
@@ -434,7 +462,7 @@ if "service" in st.session_state:
                         st.write(f"- {reason}")
 
     elif st.session_state["service"] == "analyze":
-        st.subheader("تحليل الأسعار")
+        st.title("تحليل الأسعار")
         scope_file = st.file_uploader("ارفع نطاق العمل (PDF)", type=["pdf"], key="scope")
         price_file = st.file_uploader("ارفع جدول الأسعار (PDF)", type=["pdf"], key="price")
         if scope_file and price_file:
@@ -459,6 +487,20 @@ if "service" in st.session_state:
                     st.write(price_text)
 
     elif st.session_state["service"] == "archive":
-        st.subheader("أرشفة وتدريب الأسعار التاريخية")
+        st.title("أرشفة وتدريب الأسعار التاريخية")
         st.write("سيتم استخدام ملف `train_costimaize.py` لتدريب النظام.")
         st.write("الرجاء رفع بيانات الأسعار التاريخية لاحقًا.")
+
+    # عرض السجل وزر التحميل في كل صفحة خدمة
+    st.subheader("سجل التنفيذ")
+    if st.session_state["execution_log"]:
+        log_text = "\n".join(st.session_state["execution_log"])
+        st.text_area("سجل العمليات", log_text, height=200)
+        st.download_button(
+            label="تحميل سجل التنفيذ",
+            data=log_text,
+            file_name="execution_log.txt",
+            mime="text/plain"
+        )
+    else:
+        st.write("لا توجد عمليات مسجلة بعد.")
