@@ -344,4 +344,168 @@ def cautious_pricing(scope_results, market_results):
                     item = parts[1].split('=')[0].strip()
                     cost = float(re.search(r'\d+\.?\d*', parts[1]).group())
                     indirect_costs[item] = cost
-                    reasoning.append(f"تم تقدير تكلفة البند غير المباشر '{item}': ${cost:,.2f} بناءً على تحليل السوق
+                    reasoning.append(f"تم تقدير تكلفة البند غير المباشر '{item}': ${cost:,.2f} بناءً على تحليل السوق.")
+                except:
+                    reasoning.append(f"فشل في تقدير تكلفة البند غير المباشر: {line}")
+            elif line.startswith("Total cost:"):
+                try:
+                    total_cost = float(re.search(r'\d+\.?\d*', line).group())
+                    reasoning.append(f"تم تقدير التكلفة الإجمالية: ${total_cost:,.2f} بناءً على تحليل شامل.")
+                except:
+                    reasoning.append("فشل في تقدير التكلفة الإجمالية.")
+        log_action("اكتمل تقدير التكلفة")
+    except Exception as e:
+        log_action(f"خطأ في تقدير التكلفة: {str(e)}")
+        st.error(f"Error in cost estimation: {str(e)}")
+
+    reasoning.extend(market_reasoning)
+    return total_cost, direct_costs, indirect_costs, reasoning
+
+# واجهة Streamlit
+# إذا لم يتم اختيار خدمة بعد، اعرض الصفحة الرئيسية
+if "service" not in st.session_state:
+    st.session_state["service"] = None
+
+# الصفحة الرئيسية
+if st.session_state["service"] is None:
+    st.title("CostimAIzer - تقدير التكاليف")
+    st.subheader("اختر الخدمة التي تريدها")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if st.button("📊 تقدير التكلفة", key="estimate_button"):
+            st.session_state["service"] = "estimate"
+            # إعادة تشغيل الصفحة لعرض الخدمة المختارة
+            st.experimental_rerun()
+
+    with col2:
+        if st.button("💰 تحليل الأسعار", key="analyze_button"):
+            st.session_state["service"] = "analyze"
+            st.experimental_rerun()
+
+    with col3:
+        if st.button("📜 أرشفة وتدريب", key="archive_button"):
+            st.session_state["service"] = "archive"
+            st.experimental_rerun()
+
+    # Dashboard
+    st.subheader("إحصائيات الأعمال")
+    st.write("عدد التقديرات: 10")  # مثال
+    st.write("متوسط التكلفة: 45,000 ريال")  # مثال
+
+    # عرض السجل وزر التحميل
+    st.subheader("سجل التنفيذ")
+    if st.session_state["execution_log"]:
+        log_text = "\n".join(st.session_state["execution_log"])
+        st.text_area("سجل العمليات", log_text, height=200, key="log_text_area_main")
+        st.download_button(
+            label="تحميل سجل التنفيذ",
+            data=log_text,
+            file_name="execution_log.txt",
+            mime="text/plain",
+            key="download_log_main"
+        )
+    else:
+        st.write("لا توجد عمليات مسجلة بعد.")
+
+# التعامل مع الخدمة المختارة
+else:
+    # زر للعودة إلى الصفحة الرئيسية
+    if st.button("العودة إلى الصفحة الرئيسية", key="return_to_main"):
+        st.session_state["service"] = None
+        st.experimental_rerun()
+
+    if st.session_state["service"] == "estimate":
+        st.title("تقدير التكلفة")
+        uploaded_file = st.file_uploader("ارفع ملف الصورة أو PDF", type=["png", "jpg", "jpeg", "pdf"], key="file_uploader_estimate")
+        if uploaded_file is not None:
+            if uploaded_file.type == "application/pdf":
+                extracted_text = extract_text_from_pdf(uploaded_file)
+            else:
+                image = Image.open(uploaded_file)
+                st.image(image, caption="الملف المرفوع", use_column_width=True)
+                extracted_text = extract_text_from_image(image)
+
+            st.subheader("النص المستخرج:")
+            st.write(extracted_text)
+
+            with st.spinner("جارٍ تحليل نطاق العمل..."):
+                scope_results = analyze_scope(extracted_text)
+            tasks, direct_cost_items, indirect_cost_items, missing_details = scope_results
+
+            st.subheader("المهام المستخرجة:")
+            for task in tasks:
+                st.write(f"- {task}")
+
+            if missing_details:
+                st.subheader("التفاصيل المفقودة:")
+                for detail in missing_details:
+                    st.write(f"- {detail}")
+
+            with st.spinner("جارٍ جلب بيانات السوق..."):
+                market_results = fetch_market_data(extracted_text, direct_cost_items, indirect_cost_items)
+
+            if st.button("إظهار النتائج", key="show_results_estimate"):
+                with st.spinner("جارٍ تقدير التكلفة..."):
+                    total_cost, direct_costs, indirect_costs, reasoning = cautious_pricing(scope_results, market_results)
+
+                    st.subheader("التقدير النهائي للتكلفة:")
+                    st.write(f"${total_cost:,.2f}")
+
+                    st.subheader("تفاصيل التكاليف:")
+                    st.write("**التكاليف المباشرة:**")
+                    for item, cost in direct_costs.items():
+                        st.write(f"- {item}: ${cost:,.2f}")
+                    st.write("**التكاليف غير المباشرة:**")
+                    for item, cost in indirect_costs.items():
+                        st.write(f"- {item}: ${cost:,.2f}")
+
+                    st.subheader("تفسير القرارات:")
+                    for reason in reasoning:
+                        st.write(f"- {reason}")
+
+    elif st.session_state["service"] == "analyze":
+        st.title("تحليل الأسعار")
+        scope_file = st.file_uploader("ارفع نطاق العمل (PDF)", type=["pdf"], key="file_uploader_scope_analyze")
+        price_file = st.file_uploader("ارفع جدول الأسعار (PDF)", type=["pdf"], key="file_uploader_price_analyze")
+        if scope_file and price_file:
+            with st.spinner("جارٍ تحليل الملفات..."):
+                scope_text = extract_text_from_pdf(scope_file)
+                price_text = extract_text_from_pdf(price_file)
+
+                st.subheader("نطاق العمل المستخرج:")
+                st.write(scope_text)
+                st.subheader("جدول الأسعار المستخرج:")
+                st.write(price_text)
+
+                scope_results = analyze_scope(scope_text)
+                tasks, direct_cost_items, indirect_cost_items, missing_details = scope_results
+
+                market_results = fetch_market_data(scope_text, direct_cost_items, indirect_cost_items)
+
+                if st.button("إظهار النتائج", key="show_results_analyze"):
+                    total_cost, direct_costs, indirect_costs, reasoning = cautious_pricing(scope_results, market_results)
+                    st.success(f"تقدير التكلفة: ${total_cost:,.2f}")
+                    st.write("مقارنة مع جدول الأسعار:")
+                    st.write(price_text)
+
+    elif st.session_state["service"] == "archive":
+        st.title("أرشفة وتدريب الأسعار التاريخية")
+        st.write("سيتم استخدام ملف `train_costimaize.py` لتدريب النظام.")
+        st.write("الرجاء رفع بيانات الأسعار التاريخية لاحقًا.")
+
+    # عرض السجل وزر التحميل في كل صفحة خدمة
+    st.subheader("سجل التنفيذ")
+    if st.session_state["execution_log"]:
+        log_text = "\n".join(st.session_state["execution_log"])
+        st.text_area("سجل العمليات", log_text, height=200, key="log_text_area_service")
+        st.download_button(
+            label="تحميل سجل التنفيذ",
+            data=log_text,
+            file_name="execution_log.txt",
+            mime="text/plain",
+            key="download_log_service"
+        )
+    else:
+        st.write("لا توجد عمليات مسجلة بعد.")
