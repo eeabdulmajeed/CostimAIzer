@@ -21,16 +21,12 @@ import tempfile
 # 3. أي تعديلات يجب أن تكون تراكمية مع الحفاظ على الوظائف القائمة.
 
 # إعداد مسار مؤقت لتخزين بيانات NLTK
-# تعديل: استخدام مسار داخل مجلد التطبيق لتجنب مشاكل الأذونات في Streamlit Cloud
 nltk_data_path = os.path.join(os.getcwd(), "nltk_data")
-
-# تعديل: استخدام exist_ok=True مع معالجة الأخطاء
 try:
     os.makedirs(nltk_data_path, exist_ok=True)
     nltk.data.path.append(nltk_data_path)
 except Exception as e:
     st.error(f"Error creating NLTK data directory: {str(e)}")
-    # متابعة التنفيذ حتى لو فشل إنشاء المجلد، لأن NLTK قد تعمل بدون هذا المجلد إذا كانت البيانات موجودة
 
 # تحميل بيانات NLTK إذا لم تكن موجودة
 try:
@@ -76,7 +72,7 @@ def extract_text_from_image(image):
     try:
         image = preprocess_image(image)
         text = pytesseract.image_to_string(image, lang='ara+eng')
-        log_action("اكتمل استخراج النص من الصورة")
+        log_action("اكتمال استخراج النص من الصورة")
         return text
     except Exception as e:
         log_action(f"خطأ في استخراج النص: {str(e)}")
@@ -86,12 +82,10 @@ def extract_text_from_image(image):
 def extract_text_from_pdf(uploaded_file):
     log_action("بدء استخراج النص من PDF")
     try:
-        # إنشاء ملف مؤقت لحفظ الملف المرفوع
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
             temp_file.write(uploaded_file.read())
             temp_file_path = temp_file.name
 
-        # تحويل PDF إلى صور باستخدام الملف المؤقت
         images = convert_from_path(temp_file_path, size=(2000, 2000))
         text = ""
         for i, image in enumerate(images):
@@ -100,7 +94,6 @@ def extract_text_from_pdf(uploaded_file):
             page_text = extract_text_from_image(image)
             text += page_text + "\n"
 
-        # حذف الملف المؤقت بعد المعالجة
         os.remove(temp_file_path)
         log_action("اكتمل استخراج النص من PDF")
         return text
@@ -351,165 +344,4 @@ def cautious_pricing(scope_results, market_results):
                     item = parts[1].split('=')[0].strip()
                     cost = float(re.search(r'\d+\.?\d*', parts[1]).group())
                     indirect_costs[item] = cost
-                    reasoning.append(f"تم تقدير تكلفة البند غير المباشر '{item}': ${cost:,.2f} بناءً على تحليل السوق.")
-                except:
-                    reasoning.append(f"فشل في تقدير تكلفة البند غير المباشر: {line}")
-            elif line.startswith("Total cost:"):
-                try:
-                    total_cost = float(re.search(r'\d+\.?\d*', line).group())
-                    reasoning.append(f"تم تقدير التكلفة الإجمالية: ${total_cost:,.2f} بناءً على تحليل شامل.")
-                except:
-                    reasoning.append("فشل في تقدير التكلفة الإجمالية.")
-        log_action("اكتمل تقدير التكلفة")
-    except Exception as e:
-        log_action(f"خطأ في تقدير التكلفة: {str(e)}")
-        st.error(f"Error in cost estimation: {str(e)}")
-
-    reasoning.extend(market_reasoning)
-    return total_cost, direct_costs, indirect_costs, reasoning
-
-# واجهة Streamlit
-# إذا لم يتم اختيار خدمة بعد، اعرض الصفحة الرئيسية
-if "service" not in st.session_state:
-    st.session_state["service"] = None
-
-# الصفحة الرئيسية
-if st.session_state["service"] is None:
-    st.title("CostimAIzer - تقدير التكاليف")
-    st.subheader("اختر الخدمة التي تريدها")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        if st.button("📊 تقدير التكلفة"):
-            st.session_state["service"] = "estimate"
-            st.experimental_rerun()  # إعادة تشغيل الصفحة لعرض الخدمة المختارة
-
-    with col2:
-        if st.button("💰 تحليل الأسعار"):
-            st.session_state["service"] = "analyze"
-            st.experimental_rerun()
-
-    with col3:
-        if st.button("📜 أرشفة وتدريب"):
-            st.session_state["service"] = "archive"
-            st.experimental_rerun()
-
-    # Dashboard
-    st.subheader("إحصائيات الأعمال")
-    st.write("عدد التقديرات: 10")  # مثال
-    st.write("متوسط التكلفة: 45,000 ريال")  # مثال
-
-    # عرض السجل وزر التحميل
-    st.subheader("سجل التنفيذ")
-    if st.session_state["execution_log"]:
-        log_text = "\n".join(st.session_state["execution_log"])
-        st.text_area("سجل العمليات", log_text, height=200)
-        st.download_button(
-            label="تحميل سجل التنفيذ",
-            data=log_text,
-            file_name="execution_log.txt",
-            mime="text/plain"
-        )
-    else:
-        st.write("لا توجد عمليات مسجلة بعد.")
-
-# التعامل مع الخدمة المختارة
-else:
-    # زر للعودة إلى الصفحة الرئيسية
-    if st.button("العودة إلى الصفحة الرئيسية"):
-        st.session_state["service"] = None
-        st.experimental_rerun()
-
-    if st.session_state["service"] == "estimate":
-        st.title("تقدير التكلفة")
-        uploaded_file = st.file_uploader("ارفع ملف الصورة أو PDF", type=["png", "jpg", "jpeg", "pdf"], key="file_uploader_1")
-        if uploaded_file is not None:
-            if uploaded_file.type == "application/pdf":
-                extracted_text = extract_text_from_pdf(uploaded_file)
-            else:
-                image = Image.open(uploaded_file)
-                st.image(image, caption="الملف المرفوع", use_column_width=True)
-                extracted_text = extract_text_from_image(image)
-
-            st.subheader("النص المستخرج:")
-            st.write(extracted_text)
-
-            with st.spinner("جارٍ تحليل نطاق العمل..."):
-                scope_results = analyze_scope(extracted_text)
-            tasks, direct_cost_items, indirect_cost_items, missing_details = scope_results
-
-            st.subheader("المهام المستخرجة:")
-            for task in tasks:
-                st.write(f"- {task}")
-
-            if missing_details:
-                st.subheader("التفاصيل المفقودة:")
-                for detail in missing_details:
-                    st.write(f"- {detail}")
-
-            with st.spinner("جارٍ جلب بيانات السوق..."):
-                market_results = fetch_market_data(extracted_text, direct_cost_items, indirect_cost_items)
-
-            if st.button("إظهار النتائج"):
-                with st.spinner("جارٍ تقدير التكلفة..."):
-                    total_cost, direct_costs, indirect_costs, reasoning = cautious_pricing(scope_results, market_results)
-
-                    st.subheader("التقدير النهائي للتكلفة:")
-                    st.write(f"${total_cost:,.2f}")
-
-                    st.subheader("تفاصيل التكاليف:")
-                    st.write("**التكاليف المباشرة:**")
-                    for item, cost in direct_costs.items():
-                        st.write(f"- {item}: ${cost:,.2f}")
-                    st.write("**التكاليف غير المباشرة:**")
-                    for item, cost in indirect_costs.items():
-                        st.write(f"- {item}: ${cost:,.2f}")
-
-                    st.subheader("تفسير القرارات:")
-                    for reason in reasoning:
-                        st.write(f"- {reason}")
-
-    elif st.session_state["service"] == "analyze":
-        st.title("تحليل الأسعار")
-        scope_file = st.file_uploader("ارفع نطاق العمل (PDF)", type=["pdf"], key="scope")
-        price_file = st.file_uploader("ارفع جدول الأسعار (PDF)", type=["pdf"], key="price")
-        if scope_file and price_file:
-            with st.spinner("جارٍ تحليل الملفات..."):
-                scope_text = extract_text_from_pdf(scope_file)
-                price_text = extract_text_from_pdf(price_file)
-
-                st.subheader("نطاق العمل المستخرج:")
-                st.write(scope_text)
-                st.subheader("جدول الأسعار المستخرج:")
-                st.write(price_text)
-
-                scope_results = analyze_scope(scope_text)
-                tasks, direct_cost_items, indirect_cost_items, missing_details = scope_results
-
-                market_results = fetch_market_data(scope_text, direct_cost_items, indirect_cost_items)
-
-                if st.button("إظهار النتائج"):
-                    total_cost, direct_costs, indirect_costs, reasoning = cautious_pricing(scope_results, market_results)
-                    st.success(f"تقدير التكلفة: ${total_cost:,.2f}")
-                    st.write("مقارنة مع جدول الأسعار:")
-                    st.write(price_text)
-
-    elif st.session_state["service"] == "archive":
-        st.title("أرشفة وتدريب الأسعار التاريخية")
-        st.write("سيتم استخدام ملف `train_costimaize.py` لتدريب النظام.")
-        st.write("الرجاء رفع بيانات الأسعار التاريخية لاحقًا.")
-
-    # عرض السجل وزر التحميل في كل صفحة خدمة
-    st.subheader("سجل التنفيذ")
-    if st.session_state["execution_log"]:
-        log_text = "\n".join(st.session_state["execution_log"])
-        st.text_area("سجل العمليات", log_text, height=200)
-        st.download_button(
-            label="تحميل سجل التنفيذ",
-            data=log_text,
-            file_name="execution_log.txt",
-            mime="text/plain"
-        )
-    else:
-        st.write("لا توجد عمليات مسجلة بعد.")
+                    reasoning.append(f"تم تقدير تكلفة البند غير المباشر '{item}': ${cost:,.2f} بناءً على تحليل السوق
